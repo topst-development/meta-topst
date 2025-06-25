@@ -1,0 +1,9 @@
+libdir=/usr/lib
+includedir=/usr/include
+Name: nng
+Version: 1.5.2
+Description: nanomsg-next-generation -- light-weight brokerless messaging 
+URL: https://github.com/nanomsg/nng
+Libs: -L${libdir} -lnng
+Libs.private: -lm
+Cflags: -I${includedir} -I${includedir}/nng -I${includedir}/nng/compat

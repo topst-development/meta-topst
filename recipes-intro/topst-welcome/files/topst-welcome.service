@@ -1,0 +1,14 @@
+[Unit]
+Description=Cog Browser Service for Topst Nano Server
+After=topst-nano-server.service
+Requires=weston.service topst-nano-server.service
+
+[Service]
+Environment="XDG_RUNTIME_DIR=/run/user/root"
+Environment="COG_PLATFORM_WL_VIEW_FULLSCREEN=1"
+ExecStart=/bin/sh -c 'sleep 2 && cog --enable-write-console-messages-to-stdout=1 http://localhost:8080/index.html'
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

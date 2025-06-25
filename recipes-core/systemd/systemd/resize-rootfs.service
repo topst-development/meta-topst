@@ -1,0 +1,12 @@
+[Unit]
+Description=Resize root filesystem to fill partition
+DefaultDependencies=no
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/resize-rootfs.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target

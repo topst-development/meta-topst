@@ -1,0 +1,14 @@
+#Static Setting
+[Match]
+Name=eth*
+
+[Link]
+MACAddress=F4:50:EB:DF:5D:6F
+MTUBytes=1500
+
+[Network]
+Address=192.168.0.100/24
+Gateway=192.168.0.8
+
+[Route]
+Gateway=192.168.0.8

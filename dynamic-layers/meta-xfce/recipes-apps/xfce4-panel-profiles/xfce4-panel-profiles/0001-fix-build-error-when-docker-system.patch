@@ -1,0 +1,25 @@
+From 65f6c9a2556d5063ce22e25db46710c53aae5092 Mon Sep 17 00:00:00 2001
+From: Wily Taekhyun Shin <thshin@telechips.com>
+Date: Mon, 12 May 2025 10:07:04 +0000
+Subject: [PATCH] fix build error when docker system
+
+---
+ Makefile.in.in | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/Makefile.in.in b/Makefile.in.in
+index 84b12cb..4670f5f 100644
+--- a/Makefile.in.in
++++ b/Makefile.in.in
+@@ -30,7 +30,7 @@ pot:
+ 	cd po; intltool-update --pot --gettext-package=xfce4-panel-profiles
+ 
+ ifeq ($(shell tar --help|grep -o sort=),sort=)
+-  TAROPTS := --sort=name --format ustar
++  TAROPTS := --sort=name --format=posix --owner=0 --group=0
+ endif
+ layouts:
+ 	cd data/layouts/cupertino; tar $(TAROPTS) -cvjf "../Cupertino.tar.bz2" *
+-- 
+2.35.2
+

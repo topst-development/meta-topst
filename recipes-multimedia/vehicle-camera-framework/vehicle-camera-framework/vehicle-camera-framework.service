@@ -1,0 +1,11 @@
+[Unit]
+Description=Telechips Vehicle Camera Framework
+After=sysinit.target local-fs.target
+Wants=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/vcf_server
+
+[Install]
+WantedBy=multi-user.target
