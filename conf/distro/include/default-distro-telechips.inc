@@ -14,7 +14,7 @@ DISTRO_FEATURES_DEFAULT = "acl alsa argp debuginfod ext2 largefile opengl pam us
 DISTRO_FEATURES_BACKFILL:remove = "pulseaudio"
 
 SDK_NAME = "${DISTRO}-${TCLIBC}-${SDK_ARCH}-${IMAGE_BASENAME}-${TUNE_PKGARCH}"
-SDKPATH = "/opt/${DISTRO}/${TELECHIPS_LINUX_SDK_VERSION}"
+SDKPATH = "/opt/${DISTRO}/${TOPST_LINUX_SDK_VERSION}"
 
 # Set image block size to 4096 because default block size of UFS is 4096.
 EXTRA_IMAGECMD:append = " -b 4096"
