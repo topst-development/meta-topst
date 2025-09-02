@@ -1,0 +1,7 @@
+/meta-*
+!meta-genivi
+!meta-topst-subcore
+*.pyc
+*.pyo
+*.swp
+*.so

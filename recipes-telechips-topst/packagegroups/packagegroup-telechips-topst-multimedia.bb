@@ -4,6 +4,7 @@ DESCRIPTION = "The set of packages for multimedia feature for TOPST"
 inherit packagegroup
 
 RDEPENDS:${PN} = " \
+	kernel-modules-vpu \
 	gstreamer1.0-meta-audio \
 	gstreamer1.0-meta-video \
 	gstreamer1.0-meta-extra \

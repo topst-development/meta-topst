@@ -3,6 +3,9 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/${PN}:"
 SRC_URI:append = " \
 	${@bb.utils.contains('TOPST_FEATURES', 'support-4k-video', '', 'file://disable-4k.cfg', d)} \
 	${@bb.utils.contains('TOPST_FEATURES', 'support-tty-console', 'file://tty-console.cfg', '', d)} \
+	${@bb.utils.contains('TOPST_FEATURES', 'support-bt-usb', 'file://bt-usb.cfg', '', d)} \
+	${@bb.utils.contains('TOPST_FEATURES', 'support-nf-docker', 'file://nf-docker.cfg', '', d)} \
+	${@bb.utils.contains('TOPST_FEATURES', 'support-swap', 'file://swap.cfg', '', d)} \
 	${@bb.utils.contains('DISTRO_FEATURES', 'systemd', 'file://systemd.cfg', '', d)} \
 	${@bb.utils.contains('DISTRO_FEATURES', 'nfs', 'file://nfs.cfg', '', d)} \
 	${@bb.utils.contains('TCC_BSP_FEATURES', 'with-subcore', 'file://touch-bridge.cfg', '', d)} \
