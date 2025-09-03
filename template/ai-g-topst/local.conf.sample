@@ -312,7 +312,6 @@ CONF_VERSION = "2"
 
 ############# TOPST CONF ############
 #TOPST_FEATURES += "bootchart"
-TOPST_FEATURES += "multimedia"
 TOPST_FEATURES += "network"
 TOPST_FEATURES += "pcie-host"
 TOPST_FEATURES += "camera"
@@ -327,3 +326,6 @@ TOPST_FEATURES += "display"
 
 # Set maximum system partition size. MB
 #SYSTEM_PARTITION_SIZE = "5120"
+
+# Enable Network features in U-BOOT
+IMAGE_FEATURES += "uboot-net"

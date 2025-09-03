@@ -317,6 +317,9 @@ TOPST_FEATURES += "multimedia"
 TOPST_FEATURES += "support-4k-video"
 TOPST_FEATURES += "network"
 TOPST_FEATURES += "support-tty-console"
+TOPST_FEATURES += "support-bt-usb"
+TOPST_FEATURES += "support-nf-docker"
+TOPST_FEATURES += "support-swap"
 
 DISTRO_FEATURES:append = " pulseaudio"
 #DISTRO_FEATURES:append = " x11 ipv6 polkit seccomp bluetooth"
@@ -329,3 +332,6 @@ DISTRO_FEATURES:append = " pulseaudio"
 #SYSTEM_PARTITION_SIZE = "20480"
 #LICENSE_FLAGS_ACCEPTED = "commercial"
 #INCOMPATIBLE_LICENSE = ""
+
+# Enable Network features in U-BOOT
+IMAGE_FEATURES += "uboot-net"
