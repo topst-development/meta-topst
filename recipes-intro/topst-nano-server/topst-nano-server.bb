@@ -14,7 +14,7 @@ SRC_URI = "\
 "
 SRC_URI[sha256sum] = "7f0ff6c4bc3c9ddaedbc5cc506b7f2bccd132bbc0e7343ebe7c702a021051238"
 
-SRCREV = "8c44ee9f88ed7f731b912ce91e7b7952a6c59d91"
+SRCREV = "${AUTOREV}"
 
 S = "${WORKDIR}/git"
 

@@ -7,7 +7,7 @@ SRC_URI = "${TELECHIPS_TOPST_GIT}/tc-nn-app.git;protocol=${TOPST_GIT_PROTOCOL};b
 	file://tc-nn-app.service \
 "
 
-SRCREV = "5b4ac396fd8a693cd061f6a324e0a4ffe1ca7cd4"
+SRCREV = "${AUTOREV}"
 
 PATCHTOOL = "git"
 inherit pkgconfig cmake systemd

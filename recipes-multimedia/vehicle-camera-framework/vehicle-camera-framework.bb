@@ -12,7 +12,7 @@ RDEPENDS:${PN} += "nng"
 SRC_URI = "${TELECHIPS_TOPST_GIT}/vehicle-camera-framework.git;protocol=${TOPST_GIT_PROTOCOL};branch=${TOPST_BRANCH}; \
 file://vehicle-camera-framework.service \
 "
-SRCREV = "6f3ecf70bbabfa65aa29047690a041325183d240"
+SRCREV = "${AUTOREV}"
 
 S = "${WORKDIR}/git"
 B = "${S}"
