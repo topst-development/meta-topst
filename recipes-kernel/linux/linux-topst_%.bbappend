@@ -3,7 +3,10 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/${PN}:"
 SRC_URI:append = " \
 	${@bb.utils.contains('TOPST_FEATURES', 'support-4k-video', '', 'file://disable-4k.cfg', d)} \
 	${@bb.utils.contains('TOPST_FEATURES', 'support-tty-console', 'file://tty-console.cfg', '', d)} \
+	${@bb.utils.contains('TOPST_CAM_MODULE', 'ov5647', 'file://ov5647.cfg', '', d)} \
+	${@bb.utils.contains('TOPST_CAM_MODULE', 'imx219', 'file://imx219.cfg', '', d)} \
 	${@bb.utils.contains('TOPST_FEATURES', 'support-bt-usb', 'file://bt-usb.cfg', '', d)} \
+	${@bb.utils.contains('TOPST_FEATURES', 'support-pcie-usb', 'file://pcie-usb.cfg', '', d)} \
 	${@bb.utils.contains('TOPST_FEATURES', 'support-nf-docker', 'file://nf-docker.cfg', '', d)} \
 	${@bb.utils.contains('TOPST_FEATURES', 'support-swap', 'file://swap.cfg', '', d)} \
 	${@bb.utils.contains('DISTRO_FEATURES', 'systemd', 'file://systemd.cfg', '', d)} \
@@ -29,4 +32,38 @@ python __anonymous() {
             src_uri.append('file://netfilter.cfg')
 
     d.setVar('SRC_URI', ' '.join(src_uri))
+}
+
+do_compile:prepend:tcc805x() {
+	dtsi="${S}/arch/arm64/boot/dts/telechips/tcc805x/override/tcc805x-videoinput-camera-module.dtsi"
+
+	if [ ! -f "${dtsi}" ]; then
+		echo "NOTE: ${dtsi} not found, skip camera sensor toggling"
+		exit 0
+	fi
+
+	if ${@bb.utils.contains('TOPST_CAM_MODULE','ov5647','true','false',d)}; then
+		sed -i -E 's|^([[:space:]]*)//[[:space:]]*#include[[:space:]]+"tcc805x-videoinput-mipi0-ov5647\.dtsi"|\1#include "tcc805x-videoinput-mipi0-ov5647.dtsi"|' "${dtsi}"
+	fi
+
+	if ${@bb.utils.contains('TOPST_CAM_MODULE','imx219','true','false',d)}; then
+		sed -i -E 's|^([[:space:]]*)//[[:space:]]*#include[[:space:]]+"tcc805x-videoinput-mipi0-imx219\.dtsi"|\1#include "tcc805x-videoinput-mipi0-imx219.dtsi"|' "${dtsi}"
+	fi
+}
+
+do_compile:prepend:tcc750x() {
+	dtsi="${S}/arch/arm64/boot/dts/telechips/tcc750x/override/tcc750x-videoinput-camera-module.dtsi"
+
+	if [ ! -f "${dtsi}" ]; then
+		echo "NOTE: ${dtsi} not found, skip camera sensor toggling"
+		exit 0
+	fi
+
+	if ${@bb.utils.contains('TOPST_CAM_MODULE','ov5647','true','false',d)}; then
+		sed -i -E 's|^([[:space:]]*)//[[:space:]]*#include[[:space:]]+"tcc750x-videoinput-ov5647\.dtsi"|\1#include "tcc750x-videoinput-ov5647.dtsi"|' "${dtsi}"
+	fi
+
+	if ${@bb.utils.contains('TOPST_CAM_MODULE','imx219','true','false',d)}; then
+		sed -i -E 's|^([[:space:]]*)//[[:space:]]*#include[[:space:]]+"tcc750x-videoinput-imx219\.dtsi"|\1#include "tcc750x-videoinput-imx219.dtsi"|' "${dtsi}"
+	fi
 }
