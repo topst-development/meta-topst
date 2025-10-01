@@ -4,7 +4,7 @@ LICENSE = "Telechips"
 LIC_FILES_CHKSUM = "file://${THISDIR}/../../licenses/Telechips;md5=bf748a8e7a397a71f48f21715741f8a1"
 
 SRC_URI = "${TELECHIPS_TOPST_GIT}/tc-nn-camera-app.git;protocol=${TOPST_GIT_PROTOCOL};branch=${TOPST_BRANCH}"
-SRCREV = "${AUTOREV}"
+SRCREV = "fa3001859a07f9789cf14db1fd0ceeaa76988d1f"
 
 inherit pkgconfig cmake
 
