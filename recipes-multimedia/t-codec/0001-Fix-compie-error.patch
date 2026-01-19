@@ -1,0 +1,26 @@
+From 6c22def5a6861e3eb75425ba084a25ce404dca9a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=EC=8B=A0=EC=84=B1=ED=99=98=20=28SH=20Shin=29?=
+ <shshin@telechips.com>
+Date: Mon, 14 Apr 2025 15:54:35 +0900
+Subject: [PATCH] Fix compie error
+
+---
+ encoder/resources/wrapper/ver_vpu_legacy.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/encoder/resources/wrapper/ver_vpu_legacy.c b/encoder/resources/wrapper/ver_vpu_legacy.c
+index 003f337..ea76fd2 100644
+--- a/encoder/resources/wrapper/ver_vpu_legacy.c
++++ b/encoder/resources/wrapper/ver_vpu_legacy.c
+@@ -131,7 +131,7 @@ void ver_vpu_leg_destory_resource(VE_RESOURCE_T *ptResource)
+ 			VER_CAST(ptVpuLegacy, ptResource->ptResourceContext);
+ 
+ 			if (ptVpuLegacy->ptPluginDesc != NULL) {
+-				(void)ptVpuLegacy->ptPluginDesc->plugclose(ptVpuLegacy->hPlugin);
++				(void)ptVpuLegacy->ptPluginDesc->close(ptVpuLegacy->hPlugin);
+ 			}
+ 
+ 			if (ptVpuLegacy->hPlugin_IF != NULL) {
+-- 
+2.25.1
+

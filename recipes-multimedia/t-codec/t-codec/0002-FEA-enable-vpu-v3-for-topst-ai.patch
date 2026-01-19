@@ -1,0 +1,44 @@
+From f17d4717a2268afd61854ef50b99f5ff30f2db1f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=EA=B9=80=EC=A0=95=EB=9E=98B=20=28KIM=20Jungrae=29?=
+ <jrk@telechips.com>
+Date: Mon, 27 Oct 2025 06:36:01 +0900
+Subject: [PATCH] [FEA] enable vpu v3 for topst-ai
+
+---
+ CMakeLists.txt           | 6 +++---
+ compile_definition.cmake | 2 --
+ 2 files changed, 3 insertions(+), 5 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 5a49154..8682e9b 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -86,9 +86,9 @@ endif()
+ add_subdirectory(tester)
+ endif()
+ 
+-if(VPU_V3_ON)
+-add_subdirectory(vpu_test)
+-endif()
++#if(VPU_V3_ON)
++#add_subdirectory(vpu_test)
++#endif()
+ 
+ ###### Install pkgconfig
+ configure_file(${PROJECT_NAME}.pc.in ${PROJECT_NAME}.pc @ONLY)
+diff --git a/compile_definition.cmake b/compile_definition.cmake
+index 5a829d9..b5a9e4c 100644
+--- a/compile_definition.cmake
++++ b/compile_definition.cmake
+@@ -99,8 +99,6 @@ elseif(${CHIPSET} STREQUAL "tcc802x")
+ 	add_definitions(-DTCC_VPU_C7_INCLUDE)
+ 	add_definitions(-DUSE_COMMON_KERNEL_LOCATION)
+ elseif(${CHIPSET} STREQUAL "tcc750x")
+-	set(VPU_LEGACY_ON ON)
+-	set(VPU_V3_ON OFF)
+ 	set(DECODER_ON OFF)
+ 
+ 	add_definitions(-DTCC_750X_INCLUDE)
+-- 
+2.25.1
+

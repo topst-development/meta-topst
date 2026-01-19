@@ -9,12 +9,21 @@ SRC_URI:append = " \
 	${@bb.utils.contains('TOPST_FEATURES', 'support-pcie-usb', 'file://pcie-usb.cfg', '', d)} \
 	${@bb.utils.contains('TOPST_FEATURES', 'support-nf-docker', 'file://nf-docker.cfg', '', d)} \
 	${@bb.utils.contains('TOPST_FEATURES', 'support-swap', 'file://swap.cfg', '', d)} \
+	${@bb.utils.contains('TOPST_FEATURES', 'support-tcc-ipc', 'file://tcc-ipc.cfg', '', d)} \
 	${@bb.utils.contains('DISTRO_FEATURES', 'systemd', 'file://systemd.cfg', '', d)} \
 	${@bb.utils.contains('DISTRO_FEATURES', 'nfs', 'file://nfs.cfg', '', d)} \
 	${@bb.utils.contains('TCC_BSP_FEATURES', 'with-subcore', 'file://touch-bridge.cfg', '', d)} \
 "
 
 SRC_URI += "file://topst-base.cfg"
+
+SRC_URI:append:tcc805x = " \
+        file://Linux_YP4.0_IVI_1.0.0_0002_bug-Replaced-vioctimer-to-hrtimer-in-drm-screen-share_linux-telechips_5.10.patch \
+        file://Linux_YP4.0_IVI_1.0.0_0013_upg-media-tcc-mipi-csi2-reduce-printing-log-for-CSI-error_linux-telechips_5.10.patch \
+        file://Linux_YP4.0_IVI_1.0.0_0017_bug-pcie-fix-system-hang-in-suspend-state_linux-telechips_5.10.patch \
+        file://Linux_YP4.0_IVI_1.0.0_0048_bug-GPIO-generating-spurious-interrupt-fixed_linux-telechips_5.10.patch \
+        file://0001-upg-pcie-update-pcie-modules-to-sync-with-latest.patch \
+"
 
 python __anonymous() {
     topst_features = d.getVar('TOPST_FEATURES', True)

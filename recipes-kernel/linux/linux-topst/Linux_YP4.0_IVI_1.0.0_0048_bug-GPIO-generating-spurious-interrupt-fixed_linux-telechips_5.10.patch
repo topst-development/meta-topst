@@ -1,0 +1,61 @@
+From 69eee3f61d164c57eecc8551d741e557b7eda98e Mon Sep 17 00:00:00 2001
+From: Jared <jared.maeng@telechips.com>
+Date: Mon, 23 Dec 2024 15:34:37 +0900
+Subject: [PATCH] [bug] GPIO: generating spurious interrupt fixed
+
+-Symptom
+Spurious interrupts on external interrupt generated
+
+-Cause
+When ret is assigned a value of 0, the normal return value of generic_handle_irq(),
+it is incorrectly returned as IRQ_NONE.
+
+-Resolution
+Modify the code to store the return value of generic_handle_irq() in a separate variable.
+set the ret value to IRQ_HANDLED or IRQ_NONE based on it.
+Additionally, ensure that chained_irq_exit() is called in all cases.
+
+TCS: TIMS-16687
+---
+ drivers/gpio/gpio-tcc.c | 14 +++++++++-----
+ 1 file changed, 9 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpio/gpio-tcc.c b/drivers/gpio/gpio-tcc.c
+index 8a7943b53e3a..82456bbb092e 100644
+--- a/drivers/gpio/gpio-tcc.c
++++ b/drivers/gpio/gpio-tcc.c
+@@ -221,22 +221,26 @@ static void tcc_gpio_set_irq_port_map(struct tcc_gpio_port *port, unsigned int i
+ static irqreturn_t tcc_gpio_irq_generic(struct irq_chip *chip, struct irq_desc *desc, struct tcc_gpio_group *gpio_gr, unsigned int pin, int flag)
+ {
+ 	irqreturn_t ret = IRQ_HANDLED;
++	int handle_ret = 0;
+ 	struct gpio_irq_chip gpio_irq = gpio_gr->gc.irq;
+ 
+ 	chained_irq_enter(chip, desc);
+ 
+ 	if (flag == IRQ_TYPE_EDGE_RISING) {
+-		ret = generic_handle_irq(irq_find_mapping(gpio_irq.domain, pin));
++		handle_ret = generic_handle_irq(irq_find_mapping(gpio_irq.domain, pin));
++		if (handle_ret == 0) {
++			ret = IRQ_HANDLED;
++		} else {
++			ret = IRQ_NONE;
++		}
+ 	} else if (flag == IRQ_TYPE_LEVEL_HIGH) {
+ 		handle_nested_irq(irq_find_mapping(gpio_irq.domain, pin));
+ 	} else {
+-		chained_irq_exit(chip, desc);
+ 		ret = IRQ_NONE;
+ 	}
+ 
+-	if (ret == IRQ_HANDLED) {
+-		chained_irq_exit(chip, desc);
+-	}
++	chained_irq_exit(chip, desc);
++
+ 	return ret;
+ }
+ 
+-- 
+2.25.1
+

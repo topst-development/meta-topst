@@ -1,0 +1,61 @@
+From 8995762f12e830e2f75631d1337edc5ed432965b Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=ED=95=9C=EB=8F=99=EC=97=B4=20=28DongYeol=20Han=29?=
+ <hdy@telechips.com>
+Date: Mon, 8 Jul 2024 15:54:01 +0900
+Subject: [PATCH] [upg] media: tcc-mipi-csi2: reduce printing log for CSI error
+
+Symptom :
+The system reboots when the CSI error occurs continuously.
+
+Cause :
+The CSI error can occur per packet.
+The other process cannot be executed in time if the log telling error
+type is printed per packet.
+
+Resolution :
+The printing error log rate has been limited by using "*_ratelimited"
+funciton.
+
+Linked Commit: N/A
+ITS: SDCL-1739
+---
+ .../tcc-mipi-csi2/csi2_s/v2.1/tcc-mipi-csi2-csis.c         | 4 ++--
+ .../media/platform/tcc-mipi-csi2/tcc-mipi-csi2-helper.h    | 7 +++++++
+ 2 files changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/media/platform/tcc-mipi-csi2/csi2_s/v2.1/tcc-mipi-csi2-csis.c b/drivers/media/platform/tcc-mipi-csi2/csi2_s/v2.1/tcc-mipi-csi2-csis.c
+index 607a18fe7379..fae44ec51297 100644
+--- a/drivers/media/platform/tcc-mipi-csi2/csi2_s/v2.1/tcc-mipi-csi2-csis.c
++++ b/drivers/media/platform/tcc-mipi-csi2/csi2_s/v2.1/tcc-mipi-csi2-csis.c
+@@ -815,8 +815,8 @@ static void which_interrupt(const struct tcc_mipi_csi2_state *state,
+ 
+ 		if (is_interrupt(check, desc->intr_srcs[idx].mask)) {
+ 			/* print which interrupt has been occurred */
+-			loge(&(state->pdev->dev), "%s\n",
+-			     desc->intr_srcs[idx].desc);
++			loge_ratelimited(&(state->pdev->dev), "%s\n",
++					 desc->intr_srcs[idx].desc);
+ 		}
+ 		idx++;
+ 	}
+diff --git a/drivers/media/platform/tcc-mipi-csi2/tcc-mipi-csi2-helper.h b/drivers/media/platform/tcc-mipi-csi2/tcc-mipi-csi2-helper.h
+index b180c6a3b70a..b0d55cc74c07 100644
+--- a/drivers/media/platform/tcc-mipi-csi2/tcc-mipi-csi2-helper.h
++++ b/drivers/media/platform/tcc-mipi-csi2/tcc-mipi-csi2-helper.h
+@@ -14,6 +14,13 @@ do {									\
+ 		fmt, LOG_TAG, __func__, __LINE__, ##__VA_ARGS__);	\
+ } while (false)
+ 
++#define loge_ratelimited(dev_ptr, fmt, ...)				\
++do {									\
++	dev_err_ratelimited(dev_ptr, "[ERROR][%s] %s(%d) - "		\
++			    fmt, LOG_TAG, __func__, __LINE__,		\
++			    ##__VA_ARGS__);				\
++} while (false)
++
+ #define logw(dev_ptr, fmt, ...)						\
+ do {									\
+ 	dev_warn(dev_ptr, "[WARN][%s] %s(%d) - "			\
+-- 
+2.25.1
+

@@ -1,0 +1,536 @@
+From 7e2c01f371d1e21b9ebd28b3091ec3da2779a313 Mon Sep 17 00:00:00 2001
+From: "hyewon.Shin" <hw.shin@telechips.com>
+Date: Thu, 18 Jul 2024 11:04:45 +0900
+Subject: [PATCH] [bug] Replaced-vioctimer-to-hrtimer-in-drm-screen-share
+
+	Symptom : Occurs intermittently when rebooting repeatedly with the 'reboot' command.
+	Deadlock occurs when using tccdrm screen share
+
+	Cause : Use vioctimer in tccdrm screen share.
+	When operating tccdrm screen share, after spin lock, call mutex from vioctimer to cause deadlock
+
+	Resolution : Replace vioctimer to hrtimer
+
+	TCS Issue : SDCL-1824
+---
+ .../telechips/telechips_drm_screen_share.c    | 332 ++++--------------
+ 1 file changed, 60 insertions(+), 272 deletions(-)
+
+diff --git a/drivers/gpu/drm/telechips/telechips_drm_screen_share.c b/drivers/gpu/drm/telechips/telechips_drm_screen_share.c
+index a91193c79785..6111f0d948f9 100644
+--- a/drivers/gpu/drm/telechips/telechips_drm_screen_share.c
++++ b/drivers/gpu/drm/telechips/telechips_drm_screen_share.c
+@@ -25,6 +25,8 @@
+ #include <linux/component.h>
+ #include <linux/regmap.h>
+ #include <linux/tcc_math.h>
++#include <linux/ktime.h>
++#include <linux/hrtimer.h>
+ #include <video/of_display_timing.h>
+ #include <video/of_videomode.h>
+ #include <drm/drm_atomic.h>
+@@ -40,8 +42,6 @@
+ 
+ #include <video/telechips/vioc_global.h>
+ #include <video/telechips/tcc_types.h>
+-#include <video/telechips/vioc_intr.h>
+-#include <video/telechips/vioc_timer.h>
+ #include <tcc_shared_buffer.h>
+ 
+ #include <telechips_drm_types.h>
+@@ -52,10 +52,10 @@
+ #include <telechips_drm_crtc_plane_helper.h>
+ #include <telechips_drm_screen_share.h>
+ 
+-#define DRIVER_DATE	"20240227"
++#define DRIVER_DATE	"20240606"
+ #define DRIVER_MAJOR 2
+ #define DRIVER_MINOR 1
+-#define DRIVER_PATCH 1
++#define DRIVER_PATCH 2
+ 
+ /* DEFINES for PLANE ---------------------------------------------------------*/
+ #define to_tcc_plane_state(plane_state) \
+@@ -83,21 +83,11 @@ struct tccdrm_screen_share_context {
+ 	wait_queue_head_t wait_display_done_queue;
+ 	atomic_t wait_display_done_event;
+ 
+-	/* VIOC TIMER */
++	/* HrTIMER */
+ 	unsigned int vrefresh;
+-	enum vioc_timer_id timer_id;
+-	#if defined(CONFIG_CHECK_DRM_TELECHIPS_VSYNC_TIME_GAP)
+-	struct timeval prev_time;
+-	#endif
++	struct hrtimer vtimer;
+ 
+ 	spinlock_t irq_lock;
+-
+-	/* timer irq */
+-	unsigned int irq_num;
+-
+-	#if defined(CONFIG_SMP)
+-	const struct cpumask *irq_cpumask;
+-	#endif
+ };
+ 
+ /* FUNCTIONS for DEVICE-TREE--------------------------------------------------*/
+@@ -489,7 +479,6 @@ static unsigned int tccdrm_ss_get_dma_address(const struct tccdrm_screen_share_c
+ 	if (internal_ok) {
+ 		/* buffer start address */
+ 		dma_addr32 = lower_32_bits(dma_addr);
+-
+ 	}
+ 	return dma_addr32;
+ }
+@@ -844,43 +833,32 @@ static void tccdrm_ss_crtc_destory(struct drm_crtc *crtc)
+  *  DR <case 2>
+  */
+ /* coverity[HIS_metric] - HIS_CALLS */
+-static int tccdrm_ss_enable_irq_of_timer(struct tccdrm_screen_share_context *dev_context,
+-					     int irq_num, int vioc_intr_inum)
++static int tccdrm_ss_enable_irq_of_timer(struct tccdrm_screen_share_context *dev_context)
+ {
+ 	unsigned long irqflags;
++	unsigned long long nsec;
++	ktime_t kt_period;
+ 
+ 	/* coverity[cert_dcl37_c] */
+ 	/* coverity[misra_c_2012_rule_14_4] */
+ 	spin_lock_irqsave(&dev_context->irq_lock, irqflags);
+ 	if (test_and_set_bit(CRTC_FLAGS_IRQ_BIT,
+-			     &dev_context->crtc_flags) != 1) {
+-		#if defined(CONFIG_CHECK_DRM_TELECHIPS_VSYNC_TIME_GAP)
+-		do_gettimeofday(&dev_context->prev_time);
+-		#endif
+-		#if defined(CONFIG_SMP)
+-		(void)irq_set_affinity_hint(
+-			dev_context->irq_num,
+-			dev_context->irq_cpumask);
+-		#endif
+-		(void)vioc_timer_clear_irq_status(dev_context->timer_id);
+-		(void)vioc_timer_clear_irq_mask(dev_context->timer_id);
+-		(void)vioc_intr_enable(irq_num, vioc_intr_inum, VIOC_DISP_INTR_DISPLAY);
+-
+-		DRM_DEV_DEBUG(dev_context->dev,
+-				"enable interrupt for display device irq(%d), blk(%d)\r\n",
+-				irq_num, vioc_intr_inum);
+-
++				&dev_context->crtc_flags) != 1) {
+ 		if ((dev_context->vrefresh >= 24U) &&
+ 			(dev_context->vrefresh <= 120U)) {
+ 			DRM_DEV_INFO(dev_context->dev,
+-					"[INFO] with vrefresh(%u)\r\n",
+-					dev_context->vrefresh);
+-			(void)vioc_timer_set_timer(dev_context->timer_id, 1, dev_context->vrefresh);
++				"[INFO] with vrefresh(%u)\r\n",
++				dev_context->vrefresh);
++
++			nsec = DIV_ROUND_UP(1000000000U, dev_context->vrefresh);
++			kt_period = ktime_set(0, nsec);
++			hrtimer_start(&dev_context->vtimer, kt_period, HRTIMER_MODE_REL);
+ 		} else {
+-			DRM_DEV_INFO(
+-				dev_context->dev,
++			DRM_DEV_INFO(dev_context->dev,
+ 				"[INFO] It with force 30Hz\r\n");
+-			(void)vioc_timer_set_timer(dev_context->timer_id, 1, 30U);
++			nsec = DIV_ROUND_UP(1000000000U, 30U);
++			kt_period = ktime_set(0, nsec);
++			hrtimer_start(&dev_context->vtimer, kt_period, HRTIMER_MODE_REL);
+ 		}
+ 	}
+ 	spin_unlock_irqrestore(&dev_context->irq_lock, irqflags);
+@@ -888,22 +866,14 @@ static int tccdrm_ss_enable_irq_of_timer(struct tccdrm_screen_share_context *dev
+ 	return 0;
+ }
+ 
+-static int tccdrm_ss_disable_irq_of_timer(struct tccdrm_screen_share_context *dev_context,
+-					      int irq_num, int vioc_intr_inum)
++static int tccdrm_ss_disable_irq_of_timer(struct tccdrm_screen_share_context *dev_context)
+ {
+-	unsigned long irqflags;
+-
+ 	/* coverity[cert_dcl37_c] */
+ 	/* coverity[misra_c_2012_rule_14_4] */
+-	spin_lock_irqsave(&dev_context->irq_lock, irqflags);
+ 	if (test_and_clear_bit(CRTC_FLAGS_IRQ_BIT,
+-			       &dev_context->crtc_flags) == 1) {
+-		DRM_DEV_DEBUG(dev_context->dev,
+-				"disable interrupt for display device irq(%d), blk(%d)\r\n",
+-				irq_num, vioc_intr_inum);
+-		(void)vioc_timer_set_irq_mask(dev_context->timer_id);
++				 &dev_context->crtc_flags) == 1) {
++		hrtimer_cancel(&dev_context->vtimer);
+ 	}
+-	spin_unlock_irqrestore(&dev_context->irq_lock, irqflags);
+ 
+ 	return 0;
+ }
+@@ -953,22 +923,10 @@ static int tccdrm_ss_crtc_enable_vblank(struct drm_crtc *crtc)
+ 	/* coverity[misra_c_2012_rule_20_7] */
+ 	/* coverity[misra_c_2012_rule_21_2] */
+ 	struct tccdrm_screen_share_context *dev_context = (struct tccdrm_screen_share_context *)to_tccdrm_screen_share_context(crtc);
+-	bool internal_ok = (bool)true;
+-	int vioc_intr_inum, irq_num;
+ 	int ret = 0;
+ 
+-	if (tcc_math_uint_gt_intmax(dev_context->irq_num)) {
+-		DRM_DEV_ERROR(dev_context->dev, "display device irq number is out of range\r\n");
+-		internal_ok = (bool)false;
+-		ret = -EINVAL;
+-	} else {
+-		irq_num = (int)dev_context->irq_num;
+-	}
+-	if (internal_ok) {
+-		vioc_intr_inum = (int)VIOC_INTR_TIMER;
+-		ret = tccdrm_ss_enable_irq_of_timer(dev_context,
+-							irq_num, vioc_intr_inum);
+-	}
++	ret = tccdrm_ss_enable_irq_of_timer(dev_context);
++
+ 	return ret;
+ }
+ 
+@@ -988,20 +946,8 @@ static void tccdrm_ss_crtc_disable_vblank(struct drm_crtc *crtc)
+ 	/* coverity[misra_c_2012_rule_20_7] */
+ 	/* coverity[misra_c_2012_rule_21_2] */
+ 	struct tccdrm_screen_share_context *dev_context = (struct tccdrm_screen_share_context *)to_tccdrm_screen_share_context(crtc);
+-	bool internal_ok = (bool)true;
+-	int vioc_intr_inum, irq_num;
+ 
+-	if (tcc_math_uint_gt_intmax(dev_context->irq_num)) {
+-		DRM_DEV_ERROR(dev_context->dev, "display device irq number is out of range\r\n");
+-		internal_ok = (bool)false;
+-	} else {
+-		irq_num = (int)dev_context->irq_num;
+-	}
+-	if (internal_ok) {
+-		vioc_intr_inum = (int)VIOC_INTR_TIMER;
+-		(void)tccdrm_ss_disable_irq_of_timer(dev_context, irq_num,
+-						     vioc_intr_inum);
+-	}
++	(void)tccdrm_ss_disable_irq_of_timer(dev_context);
+ }
+ 
+ static const struct drm_crtc_funcs tccdrm_ss_crtc_funcs = {
+@@ -1038,90 +984,38 @@ static const uint32_t tccdrm_ss_formats[] = {
+ 	DRM_FORMAT_YVU420,
+ };
+ 
+-static irqreturn_t screen_share_irq_handler(int irq, void *dev_id)
++static enum hrtimer_restart screen_share_irq_handler(struct hrtimer *timer)
+ {
+-	/* coverity[misra_c_2012_rule_11_5] */
+-	struct tccdrm_screen_share_context *dev_context =
+-		(struct tccdrm_screen_share_context *)dev_id;
+-	#if defined(CONFIG_CHECK_DRM_TELECHIPS_VSYNC_TIME_GAP)
+-	unsigned int diff_ms;
+-	struct timeval cur_time;
+-	#endif
++	struct tccdrm_screen_share_context *dev_context;
++	enum hrtimer_restart ret = HRTIMER_RESTART;
++	unsigned long long nsec;
++	ktime_t period;
+ 	bool internal_ok = (bool)true;
+-
+-	/*
+-	 * FIX
+-	 * misra_c_2012_rule_2_7_violation: The parameter irq is not used in
+-	 * the function.
+-	 */
+-	(void)irq;
++	dev_context = container_of(timer, struct tccdrm_screen_share_context, vtimer);
+ 
+ 	if (dev_context == NULL) {
+ 		DRM_DEV_INFO(NULL, "[WARN]dev_context is NULL\r\n");
++		ret = HRTIMER_NORESTART;
+ 		internal_ok = (bool)false;
+ 	}
+ 	if (internal_ok) {
+-		if (vioc_timer_is_interrupted(dev_context->timer_id) != 0) {
+-			#if defined(CONFIG_CHECK_DRM_TELECHIPS_VSYNC_TIME_GAP)
+-			unsigned int base_v, min_v, max_v;
+-			#endif
+-
+-			tccdrm_crtc_vblank_handler(&dev_context->crtc,
+-						   &dev_context->flip_state);
+-
+-			#if defined(CONFIG_CHECK_DRM_TELECHIPS_VSYNC_TIME_GAP)
+-			do_gettimeofday(&cur_time);
+-			diff_ms = tcc_time_diff_ms(
+-				(const struct device*)dev_context->dev,
+-				(const struct timeval *)&dev_context->prev_time,
+-				(const struct timeval *)&cur_time);
+-
+-			if (!tcc_math_check_uint_plus_uint(999U, dev_context->vrefresh)) {
+-				DRM_DEV_INFO(dev_context->dev,
+-					     "Invalid value at line(%d)\r\n",
+-					     __LINE__);
+-				internal_ok = (bool)false;
+-			} else {
+-				/* coverity[misra_c_2012_rule_10_4] */
+-				base_v = DIV_ROUND_UP(1000U, dev_context->vrefresh);
+-			}
+ 
+-			if (internal_ok) {
+-				if (!tcc_math_check_uint_minus_uint(base_v, 1U)) {
+-					DRM_DEV_INFO(dev_context->dev,
+-						     "Invalid value at line(%d)\r\n",
+-						     __LINE__);
+-					internal_ok = (bool)false;
+-				} else {
+-					min_v = base_v - 1U;
+-				}
+-			}
+-			if (internal_ok) {
+-				if (!tcc_math_check_uint_plus_uint(base_v, 1U)) {
+-					DRM_DEV_INFO(dev_context->dev,
+-						     "Invalid value at line(%d)\r\n",
+-						     __LINE__);
+-					internal_ok = (bool)false;
+-				} else {
+-					max_v = base_v + 1U;
+-				}
+-			}
+-			if (internal_ok) {
+-				if ((diff_ms < min_v) || (diff_ms > max_v)) {
+-					DRM_DEV_INFO(dev_context->dev,
+-						     "DIFF %ums %u00us, <%u>",
+-						     diff_ms,
+-						     vioc_timer_get_curtime(),
+-						     base_v);
+-				}
+-			}
+-			(void)memcpy(&dev_context->prev_time, &cur_time, sizeof(cur_time));
+-			#endif
+-			(void)vioc_timer_clear_irq_status(dev_context->timer_id);
++		tccdrm_crtc_vblank_handler(&dev_context->crtc,
++						&dev_context->flip_state);
++
++		if ((dev_context->vrefresh >= 24U) &&
++			(dev_context->vrefresh <= 120U)) {
++			nsec = DIV_ROUND_UP(1000000000U, dev_context->vrefresh);
++		} else {
++			nsec = DIV_ROUND_UP(1000000000U, 30U);
+ 		}
++		period = ktime_set(0, nsec);
++		hrtimer_forward_now(timer, period);
++		/* check the crtc is detached already from encoder */
++		/* coverity[cert_exp39_c] */
+ 	}
+ 
+-	return IRQ_HANDLED;
++	return ret;
+ }
+ 
+ /* coverity[misra_c_2012_rule_8_13] */
+@@ -1129,7 +1023,7 @@ static int tccdrm_ss_bind_init_variables(struct tccdrm_screen_share_context *dev
+ {
+ 	int ret = 0;
+ 
+-        /* coverity[cert_dcl37_c] */
++	/* coverity[cert_dcl37_c] */
+ 	/* coverity[misra_c_2012_rule_10_3] */
+ 	/* coverity[misra_c_2012_rule_14_4] */
+ 	/* coverity[misra_c_2012_rule_17_7] */
+@@ -1142,8 +1036,6 @@ static int tccdrm_ss_bind_init_variables(struct tccdrm_screen_share_context *dev
+ 	/* coverity[misra_c_2012_rule_21_2] */
+ 	atomic_set(&dev_context->wait_display_done_event, 0);
+ 
+-	dev_context->timer_id = VIOC_TIMER_TIMER0;
+-
+ 	return ret;
+ }
+ 
+@@ -1174,101 +1066,19 @@ static struct tccdrm_screen_share_context *tccdrm_ss_bind_create_context(struct
+ 	if (internal_ok) {
+ 		dev_context->dev = dev;
+ 		dev_context->drm = drm;
+-	}
+-
+-	return dev_context;
+-}
+ 
+-static int tccdrm_ss_bind_parse_context(struct tccdrm_screen_share_context *dev_context)
+-{
+-	/* coverity[cert_arr39_c] */
+-	/* coverity[cert_dcl37_c] */
+-	/* coverity[misra_c_2012_rule_8_5] */	//
+-	/* coverity[misra_c_2012_rule_8_6] */	//
+-	/* coverity[misra_c_2012_rule_8_13] */
+-	/* coverity[misra_c_2012_rule_10_1] */
+-	/* coverity[misra_c_2012_rule_11_5] */
+-	/* coverity[misra_c_2012_rule_14_4] */
+-	/* coverity[misra_c_2012_rule_15_6] */
+-	/* coverity[misra_c_2012_rule_18_4] */
+-	/* coverity[misra_c_2012_rule_20_7] */
+-	/* coverity[misra_c_2012_rule_21_2] */
+-	struct platform_device *plat_dev = to_platform_device(dev_context->dev);
+-	#if defined(CONFIG_SMP)
+-	unsigned int u, irq_cpumask;
+-	#endif
+-	struct device_node *current_node;
+-	bool internal_ok = (bool)true;
+-	int ret = 0;
+-
+-	platform_set_drvdata(plat_dev, dev_context);
+-
+-	#if defined(CONFIG_SMP)
+-	/* coverity[cert_int02_c] */
+-	/* coverity[cert_int31_c] */
+-	/* coverity[misra_c_2012_rule_10_3] */
+-	/* coverity[misra_c_2012_rule_10_4] */
+-	/* coverity[misra_c_2012_rule_12_1] */
+-	/* coverity[misra_c_2012_rule_13_4] */
+-	/* coverity[misra_c_2012_rule_14_2] */
+-	for_each_online_cpu(u) {
+-		irq_cpumask = u;
+-	}
+-	dev_context->irq_cpumask = cpumask_of(irq_cpumask);
+-	DRM_DEV_INFO(dev_context->dev,
+-		     "[INFO] crtc interrupts will be handled by cpu (%ux).\r\n",
+-		     irq_cpumask);
+-	#endif
+-
+-	current_node = of_parse_phandle(dev_context->dev->of_node,
+-					"timer_device", 0);
+-	if (current_node == NULL) {
+-		DRM_DEV_ERROR(dev_context->dev,
+-				"could not find timer_device node\n");
+-		internal_ok = (bool)false;
+-		ret = -ENODEV;
+-	}
+-	if (internal_ok) {
+-		dev_context->irq_num = irq_of_parse_and_map(current_node, 0);
+-		DRM_DEV_INFO(dev_context->dev,
+-			     "[INFO] irq_num of timer device is %d\r\n",
+-			     dev_context->irq_num);
+-	}
+-	if (ret < 0) {
+-		DRM_DEV_ERROR(dev_context->dev, "failed to parse device tree\n");
++		dev_set_drvdata(dev, dev_context);
+ 	}
+ 
+-	return ret;
++	return dev_context;
+ }
+ 
+ static int tccdrm_ss_bind_init_interrupts(struct tccdrm_screen_share_context *dev_context)
+ {
+-	bool internal_ok = (bool)true;
+ 	int ret = 0;
+ 
+-	if (tcc_math_uint_gt_intmax(dev_context->irq_num)) {
+-		internal_ok = (bool)false;
+-		ret = -EINVAL;
+-	}
+-	if (internal_ok) {
+-		(void)vioc_timer_set_irq_mask(dev_context->timer_id);
+-		#if defined(CONFIG_CHECK_DRM_TELECHIPS_VSYNC_TIME_GAP)
+-		do_gettimeofday(&dev_context->prev_time);
+-		#endif
+-		#if defined(CONFIG_SMP)
+-		(void)irq_set_affinity_hint(dev_context->irq_num,
+-				       dev_context->irq_cpumask);
+-		#endif
+-		ret = devm_request_irq(
+-			dev_context->dev,
+-			dev_context->irq_num,
+-			screen_share_irq_handler, IRQF_SHARED, dev_name(dev_context->dev),
+-			dev_context);
+-		if (ret < 0) {
+-			DRM_DEV_ERROR(dev_context->dev,
+-				      "failed to request irq\r\n");
+-		}
+-	}
++	hrtimer_init(&dev_context->vtimer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
++	dev_context->vtimer.function = screen_share_irq_handler;
+ 	return ret;
+ }
+ 
+@@ -1384,7 +1194,6 @@ static int tccdrm_ss_bind(struct device *dev, struct device *master_dev,
+ 	 * used in the function.
+ 	 */
+ 	(void)data;
+-
+ 	dev_context = tccdrm_ss_bind_create_context(dev, (const struct device *)master_dev);
+ 	if (dev_context == NULL) {
+ 		internal_ok = (bool)false;
+@@ -1392,12 +1201,6 @@ static int tccdrm_ss_bind(struct device *dev, struct device *master_dev,
+ 	} else {
+ 		free_context = (bool)true;
+ 	}
+-	if (internal_ok) {
+-		ret = tccdrm_ss_bind_parse_context(dev_context);
+-		if (ret < 0) {
+-			internal_ok = (bool)false;
+-		}
+-	}
+ 	if (internal_ok) {
+ 		ret = tccdrm_ss_bind_init_phase_0(dev_context);
+ 		if (ret < 0) {
+@@ -1429,8 +1232,6 @@ static void tccdrm_ss_unbind(struct device *dev, struct device *master_dev,
+ 	/* coverity[misra_c_2012_rule_11_5] */
+ 	struct tccdrm_screen_share_context *dev_context = dev_get_drvdata(dev);
+ 	bool internal_ok = (bool)true;
+-	int irq_num, vioc_intr_inum;
+-	//unsigned long irqflags;
+ 
+ 	/*
+ 	 * FIX
+@@ -1451,22 +1252,7 @@ static void tccdrm_ss_unbind(struct device *dev, struct device *master_dev,
+ 	}
+ 
+ 	if (internal_ok) {
+-		if (tcc_math_uint_gt_intmax(dev_context->irq_num)) {
+-			internal_ok = (bool)false;
+-		} else {
+-			irq_num = (int)dev_context->irq_num;
+-		}
+-	}
+-	if (internal_ok) {
+-		vioc_intr_inum = (int)VIOC_INTR_TIMER;
+-
+-		(void)tccdrm_ss_disable_irq_of_timer(dev_context,
+-							     irq_num,
+-							     vioc_intr_inum);
+-		(void)irq_set_affinity_hint(dev_context->irq_num, NULL);
+-		devm_free_irq(dev_context->dev,
+-			      dev_context->irq_num,
+-			      dev_context);
++		(void)tccdrm_ss_disable_irq_of_timer(dev_context);
+ 	}
+ 	if (internal_ok) {
+ 		/* Deactivate CRTC clock */
+@@ -1505,19 +1291,21 @@ static int tccdrm_ss_remove(struct platform_device *plat_dev)
+ /* coverity[misra_c_2012_rule_8_13] */
+ static int tccdrm_ss_suspend(struct device *dev)
+ {
+-	//struct tccdrm_screen_share_context *dev_context = dev_get_drvdata(dev);
+-	int ret = vioc_timer_suspend();
++	struct tccdrm_screen_share_context *dev_context = dev_get_drvdata(dev);
++
++	(void)hrtimer_cancel(&dev_context->vtimer);
+ 	DRM_DEV_INFO(dev, "[INFO] \r\n");
+-	return ret;
++	return 0;
+ }
+ 
+ /* coverity[misra_c_2012_rule_8_13] */
+ static int tccdrm_ss_resume(struct device *dev)
+ {
+-	//struct tccdrm_screen_share_context *dev_context = dev_get_drvdata(dev);
+-	int ret = vioc_timer_resume();
++	struct tccdrm_screen_share_context *dev_context = dev_get_drvdata(dev);
++
++	hrtimer_restart(&dev_context->vtimer);
+ 	DRM_DEV_INFO(dev, "[INFO] \r\n");
+-	return ret;
++	return 0;
+ }
+ #endif
+ 
+-- 
+2.25.1
+

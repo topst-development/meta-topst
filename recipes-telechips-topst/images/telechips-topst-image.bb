@@ -12,6 +12,10 @@ IMAGE_INSTALL += " \
 	tzdata-posix \
 	python3 \
 	python3-pip \
+	nginx \
+	isp-server \
+	isp-frontend \
+	${@bb.utils.contains("DISTRO_FEATURES", 'vulkan', 'vkcube', '', d)} \
 "
 
 # set systemd default taget when using systemd

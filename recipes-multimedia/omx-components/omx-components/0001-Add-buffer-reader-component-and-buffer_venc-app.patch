@@ -1,0 +1,2113 @@
+From ea7e2cbffdf8d6cd6dceefe4b8eaa74339782696 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=EC=8B=A0=EC=84=B1=ED=99=98=20=28SH=20Shin=29?=
+ <shshin@telechips.com>
+Date: Thu, 17 Apr 2025 17:23:10 +0900
+Subject: [PATCH] Support zerocopy video buffer reader component
+
+---
+ CMakeLists.txt                                |    1 +
+ drivers/scaler/tcc_scaler_interface.c         |    6 +
+ omx_core/src/tcc_omxcore.c                    |    1 +
+ omx_include/OMX_Index.h                       |    9 +
+ omx_tools/src/omx_tools.c                     |   10 +
+ omx_vendor_include/OMX_VendorCommon.h         |    3 +
+ omx_videobufreader_component/CMakeLists.txt   |   31 +
+ .../include/omx_videobufreader_component.h    |   44 +
+ .../src/omx_videobufreader_component.c        |  649 ++++++++++
+ .../src/omx_videoscaler_component.c           |   28 +-
+ sample_app/CMakeLists.txt                     |    1 +
+ sample_app/buffer_venc/CMakeLists.txt         |   27 +
+ sample_app/buffer_venc/buffer_venc.c          | 1099 +++++++++++++++++
+ 13 files changed, 1897 insertions(+), 12 deletions(-)
+ create mode 100644 omx_videobufreader_component/CMakeLists.txt
+ create mode 100644 omx_videobufreader_component/include/omx_videobufreader_component.h
+ create mode 100644 omx_videobufreader_component/src/omx_videobufreader_component.c
+ create mode 100644 sample_app/buffer_venc/CMakeLists.txt
+ create mode 100644 sample_app/buffer_venc/buffer_venc.c
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index d1ec346..2f43651 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -86,6 +86,7 @@ add_subdirectory(omx_videoscaler_component)
+ add_subdirectory(omx_osd_component)
+ add_subdirectory(omx_mux_component)
+ add_subdirectory(omx_bufmngr_component)
++add_subdirectory(omx_videobufreader_component)
+ add_subdirectory(drivers)
+ add_subdirectory(test)
+ add_subdirectory(test/tester_common)
+diff --git a/drivers/scaler/tcc_scaler_interface.c b/drivers/scaler/tcc_scaler_interface.c
+index b90fa21..8f876de 100644
+--- a/drivers/scaler/tcc_scaler_interface.c
++++ b/drivers/scaler/tcc_scaler_interface.c
+@@ -123,6 +123,11 @@ static int fill_scaler_info(SCALER_TYPE *scaler_info, const tcc_scaler_info_t* s
+ 	scaler_info->src_ImgWidth = src->w;
+ 	scaler_info->src_ImgHeight = src->h;
+ 
++	if(scaler_info->src_fmt == (unsigned int)SCALER_RGB888)
++	{
++		scaler_info->src_rgb_swap = 5;
++	}
++
+ 	scaler_info->src_winLeft = src->w_x;
+ 	scaler_info->src_winTop = src->w_y;
+ 
+@@ -152,6 +157,7 @@ static int fill_scaler_info(SCALER_TYPE *scaler_info, const tcc_scaler_info_t* s
+ 		SCALER_PRINTF("scaler driver error!: %s %d\n",__func__,__LINE__ );
+ 		ret = -1;
+ 	}
++
+ 	return ret;
+ }
+ 
+diff --git a/omx_core/src/tcc_omxcore.c b/omx_core/src/tcc_omxcore.c
+index debbcd5..cd368a4 100644
+--- a/omx_core/src/tcc_omxcore.c
++++ b/omx_core/src/tcc_omxcore.c
+@@ -65,6 +65,7 @@ static char *tComponentName[MAXCOMP][2] = {
+ 	{ "OMX.TCC.camerarc", "camerarc" },
+ 	{ "OMX.TCC.mic", "mic" },
+ 	{ "OMX.TCC.reader", "reader" },
++	{ "OMX.TCC.videobufreader", "videobufreader" },
+ 	{ "OMX.TCC.VideoTransInput", "transcodevideoinput"},
+ 	{ "OMX.TCC.AudioTransInput", "transcodeaudioinput"},
+ 
+diff --git a/omx_include/OMX_Index.h b/omx_include/OMX_Index.h
+index 3176114..4a4b802 100644
+--- a/omx_include/OMX_Index.h
++++ b/omx_include/OMX_Index.h
+@@ -326,6 +326,15 @@ typedef enum OMX_INDEXTYPE {
+ 	OMX_IndexVendorConfig_Reader_GetFilledBufferCount,
+ 	OMX_IndexVendorConfig_Reader_GetFilledBufferSize,
+ 
++	// Buffer Reader component
++	OMX_IndexVendorConfig_VideoBufReader_SetSourceResolution,
++	OMX_IndexVendorConfig_VideoBufReader_SetSourceColorFormat,
++	OMX_IndexVendorConfig_VideoBufReader_RequestAllocateBuffer,
++	OMX_IndexVendorConfig_VideoBufReader_GetEmptyBuffer,
++	OMX_IndexVendorConfig_VideoBufReader_PushData,
++	OMX_IndexVendorConfig_VideoBufReader_ReturnUsedBuffer,
++	OMX_IndexVendorConfig_VideoBufReader_SetStart,
++	OMX_IndexVendorConfig_VideoBufReader_SetStop,
+ 
+ 	/* Vendor filter component specific indexes */
+ 
+diff --git a/omx_tools/src/omx_tools.c b/omx_tools/src/omx_tools.c
+index 0940300..c692062 100644
+--- a/omx_tools/src/omx_tools.c
++++ b/omx_tools/src/omx_tools.c
+@@ -223,6 +223,16 @@ unsigned long long OmxTools_check_add_ull(unsigned long long lval, unsigned long
+     return res;
+ }
+ 
++FILE *OmxTools_fopen(const char *name, const char *mode)
++{
++    return fopen(name, mode);
++}
++
++int OmxTools_fclose(FILE *fp)
++{
++    return fclose(fp);
++}
++
+ /* coverity[HIS_metric_violation : SUPPRESS] */
+ void* OmxTools_malloc_v(size_t size)
+ {
+diff --git a/omx_vendor_include/OMX_VendorCommon.h b/omx_vendor_include/OMX_VendorCommon.h
+index 4e9d813..09e7063 100644
+--- a/omx_vendor_include/OMX_VendorCommon.h
++++ b/omx_vendor_include/OMX_VendorCommon.h
+@@ -292,6 +292,9 @@ typedef struct
+ 		void *userData;
+ 		void* opaque;
+ 	} userdata;
++
++	size_t allocated_size;
++	size_t bytesused;
+ } OMX_Vendor_Common_PrivateData_VideoData_T;
+ 
+ 
+diff --git a/omx_videobufreader_component/CMakeLists.txt b/omx_videobufreader_component/CMakeLists.txt
+new file mode 100644
+index 0000000..fb1ac82
+--- /dev/null
++++ b/omx_videobufreader_component/CMakeLists.txt
+@@ -0,0 +1,31 @@
++CMAKE_MINIMUM_REQUIRED(VERSION 2.8)
++
++SET(OUTPUT_ELF "omxvideobufreader")
++
++SET(SRC_FILES
++	${CMAKE_CURRENT_SOURCE_DIR}/src/omx_videobufreader_component.c
++	)
++
++INCLUDE_DIRECTORIES(
++	${CMAKE_CURRENT_SOURCE_DIR}/include
++	${CMAKE_SOURCE_DIR}/omx_include
++	${CMAKE_SOURCE_DIR}/omx_vendor_include
++	${CMAKE_SOURCE_DIR}/omx_base/include
++	${CMAKE_SOURCE_DIR}/omx_tools/include
++	${GLIB2_INCLUDE_DIRS}
++	${TUTIL_INCLUDE_DIRS}
++	)
++
++ADD_COMPILE_OPTIONS(-g -Wall)
++
++LINK_LIBRARIES(omxbase ${GLIB2_LIBRARIES} ${TUTIL_LIBRARIES})
++
++ADD_LIBRARY(${OUTPUT_ELF} SHARED ${SRC_FILES})
++
++INSTALL(TARGETS ${OUTPUT_ELF}
++	RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
++	LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
++	ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
++	)
++
++SET_TARGET_PROPERTIES(${OUTPUT_ELF} PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${LIBDIR})
+diff --git a/omx_videobufreader_component/include/omx_videobufreader_component.h b/omx_videobufreader_component/include/omx_videobufreader_component.h
+new file mode 100644
+index 0000000..6b20843
+--- /dev/null
++++ b/omx_videobufreader_component/include/omx_videobufreader_component.h
+@@ -0,0 +1,44 @@
++/*******************************************************************************
++
++*   Copyright (c) Telechips Inc.
++*   TCC Version 1.0
++
++This source code contains confidential information of Telechips.
++
++Any unauthorized use without a written permission of Telechips including not
++limited to re-distribution in source or binary form is strictly prohibited.
++
++This source code is provided "AS IS" and nothing contained in this source code
++shall constitute any express or implied warranty of any kind, including without
++limitation, any warranty of merchantability, fitness for a particular purpose
++or non-infringement of any patent, copyright or other third party intellectual
++property right.
++No warranty is made, express or implied, regarding the information's accuracy,
++completeness, or performance.
++
++In no event shall Telechips be liable for any claim, damages or other
++liability arising from, out of or in connection with this source code or
++the use in the source code.
++
++This source code is provided subject to the terms of a Mutual Non-Disclosure
++Agreement between Telechips and Company.
++*
++*******************************************************************************/
++
++#ifndef OMX_VIDEO_BUFFREADER_H
++#define OMX_VIDEO_BUFFREADER_H
++
++/**
++ * @brief A structure representing the private data of the file reader.
++ * 
++ * This structure contains the private data of the file reader.
++ */
++typedef struct
++{
++	omx_base_source_PrivateType_FIELDS;		/** The base private data of the video buffer reader. */
++	void *pvPrivateData;					/** A pointer to the private data. */
++} omx_videobufreader_Private_T;
++
++OMX_ERRORTYPE OMX_ComponentInit(OMX_HANDLETYPE hComponent, OMX_STRING pstrCompName);
++
++#endif	// OMX_VIDEO_BUFFREADER_H
+\ No newline at end of file
+diff --git a/omx_videobufreader_component/src/omx_videobufreader_component.c b/omx_videobufreader_component/src/omx_videobufreader_component.c
+new file mode 100644
+index 0000000..195bb44
+--- /dev/null
++++ b/omx_videobufreader_component/src/omx_videobufreader_component.c
+@@ -0,0 +1,649 @@
++/**
++
++	@file omx_videobufreader_component.c
++
++	Copyright (C) 2007-2008  STMicroelectronics
++	Copyright (C) 2007-2008 Nokia Corporation and/or its subsidiary(-ies).
++	Copyright (C) 2009-2010 Telechips Inc.
++
++	This library is free software; you can redistribute it and/or modify it under
++	the terms of the GNU Lesser General Public License as published by the Free
++	Software Foundation; either version 2.1 of the License, or (at your option)
++	any later version.
++
++	This library is distributed in the hope that it will be useful, but WITHOUT
++	ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
++	FOR A PARTICULAR PURPOSE.  See the GNU Lesser General Public License for more
++	details.
++
++	You should have received a copy of the GNU Lesser General Public License
++	along with this library; if not, write to the Free Software Foundation, Inc.,
++	51 Franklin St, Fifth Floor, Boston, MA
++	02110-1301  USA
++
++*/
++#include <stdio.h>
++#include <stdlib.h>
++#include <glib.h>
++#include <sys/mman.h>
++#include <fcntl.h>
++#include <unistd.h>
++
++#include "OMX_Index.h"
++#include "OMX_CoreExt.h"
++#include "OMX_Component.h"
++#include "omx_base_source.h"
++#include "OMX_VendorCommon.h"
++#include "omx_videobufreader_component.h"
++#include "omx_base_video_port.h"
++
++#define TDBG(fmt, args...) \
++			do { \
++				struct timespec _now;    \
++				struct tm _tm;	\
++				clock_gettime(CLOCK_REALTIME, &_now); 	\
++				localtime_r(&_now.tv_sec, &_tm);	 \
++				printf("[%04d-%02d-%02d %02d:%02d:%02d.%03ld][%s:%d]" fmt "\n", _tm.tm_year + 1900, _tm.tm_mon+1, _tm.tm_mday, _tm.tm_hour, _tm.tm_min, _tm.tm_sec, _now.tv_nsec/1000000, __FUNCTION__, __LINE__, ## args); \
++			}while(0)
++#define DBG_INFO(fmt, args...) TDBG(fmt, ##args)
++#define DBG_ERR(fmt, args...) TDBG(fmt, ##args)
++#define DBG_TRACE(fmt, args...)
++
++/**
++ * @brief Enumeration for the possible states of a reader.
++ */
++typedef enum
++{
++	videobufreader_State_Stop,		/** The reader is in the stop state. */
++	videobufreader_State_Start		/** The reader is in the start state. */
++} videobufreader_State_E;
++
++/**
++ * @brief Structure representing a mapped memory region.
++ *
++ * This structure holds the base address and size of a memory region
++ * mapped using mmap(), typically used for accessing physical memory.
++ */
++typedef struct
++{
++	void* base;		/**< Base virtual address of the mapped memory. */
++	size_t size;	/**< Size in bytes of the mapped memory region. */
++} MappedMemInfo;
++
++/**
++ * @brief Structure containing private context data for the buffer reader component.
++ *
++ * This structure holds internal runtime data such as state flags, buffer queues,
++ * format/resolution settings, and memory mapping information used by the OMX buffer reader component.
++ */
++typedef struct
++{
++	videobufreader_State_E eState;  		/**< Current running state of the component (Start/Stop). */
++	OMX_BOOL reachEos;  					/**< Flag indicating whether End Of Stream (EOS) has been reached. */
++	tsem_t tSemConfig;  					/**< Semaphore used for synchronizing configuration access. */
++	GQueue *emptyBufferQueue;  				/**< Queue containing empty OMX_BUFFERHEADERTYPE structures. */
++	GQueue *outputBufferQueue; 				/**< Queue containing filled buffers waiting to be processed. */
++	GQueue *allocatedBuffers;				/**< Queue containing allocated buffers */
++	OMX_COLOR_FORMATTYPE bufColorFormat;  	/**< Color format of the input frames (e.g., RGB888, NV12). */
++	OMX_VendorConfig_Common_Resolution_T bufResoution;  /**< Resolution and stride of input frames. */
++} videobufreader_PrivateData_T;
++
++/**
++ * @brief Constructs the OMX component instance.
++ *
++ * This function constructs the OMX component instance and initializes its parameters.
++ *
++ * @param[in] pComp Pointer to the OMX component instance.
++ *
++ * @return OMX_ERRORTYPE Returns an error code indicating the status of the operation.
++ */
++static OMX_ERRORTYPE omx_videobufreader_Constructor(OMX_COMPONENTTYPE *pComp, OMX_STRING strCompontName);
++
++/**
++ * @brief Constructor function for initializing the private data of the reader component.
++ *
++ * This function constructs the OMX component instance and initializes its parameters.
++ *
++ * @param[in] pComp Pointer to the OMX component instance.
++ * @param[in] ptPrivate Pointer to the omx_videobufreader_Private_T structure containing the private data of the reader component.
++ *
++ * @return OMX_ERRORTYPE Returns an error code indicating the status of the operation.
++ */
++static OMX_ERRORTYPE omx_videobufreader_Constructor_PrivateData(OMX_COMPONENTTYPE *pComp, omx_videobufreader_Private_T *ptPrivate);
++
++/**
++ * @brief Destructs the OMX component instance.
++ *
++ * This function destructs the OMX component instance and frees any resources used by it.
++ *
++ * @param[in] pComp Pointer to the OMX component instance.
++ *
++ * @return OMX_ERRORTYPE Returns an error code indicating the status of the operation.
++ */
++static OMX_ERRORTYPE omx_videobufreader_Destructor(OMX_COMPONENTTYPE *pComp);
++
++/**
++ * @brief Sets configuration parameters for the OMX component.
++ *
++ * This function sets configuration parameters for the OMX component, based on the specified configuration type and value.
++ *
++ * @param[in] hFx Handle to the OMX component instance.
++ * @param[in] eConfig The configuration parameter to set.
++ * @param[in] pvConfig Pointer to the configuration value.
++ *
++ * @return OMX_ERRORTYPE Returns an error code indicating the status of the operation.
++ */
++static OMX_ERRORTYPE omx_videobufreader_SetConfig(OMX_HANDLETYPE hFx, OMX_INDEXTYPE eConfig, void *pvConfig);
++
++/**
++ * @brief Sets configuration parameters for the reader component related to input.
++ *
++ * @param[in,out] ptPrivateData A pointer to the reader private data structure.
++ * @param[in] eConfig The type of configuration parameter to set.
++ * @param[in] pvConfig A void pointer to the value of the configuration parameter to set.
++ *
++ * @return OMX_ERRORTYPE Returns an error code indicating the status of the operation.
++ */
++static OMX_ERRORTYPE omx_videobufreader_SetConfig_videobufreader(OMX_HANDLETYPE hFx, OMX_INDEXTYPE eConfig, void *pvConfig);
++
++/**
++ * @brief Retrieves configuration parameters for the OMX component.
++ *
++ * This function retrieves configuration parameters for the OMX component, based on the specified configuration type and value.
++ *
++ * @param[in] hFx Handle to the OMX component instance.
++ * @param[in] eConfig The configuration parameter to retrieve.
++ * @param[out] pvConfig Pointer to the buffer to store the configuration value.
++ *
++ * @return OMX_ERRORTYPE Returns an error code indicating the status of the operation.
++ */
++static OMX_ERRORTYPE omx_videobufreader_GetConfig(OMX_HANDLETYPE hFx, OMX_INDEXTYPE eConfig, void *pvConfig);
++
++/**
++ * @brief Callback function for buffer management events from the component.
++ *
++ * This function is called by the OMX component when it needs to inform the application about a buffer management event.
++ *
++ * @param[in] pComp Pointer to the OMX component instance.
++ * @param[in] ptOutputBufferHeader Pointer to the output buffer header.
++ *
++ * @return None.
++ */
++static void omx_videobufreader_BufferMgmtCallback(OMX_COMPONENTTYPE *pComp, OMX_BUFFERHEADERTYPE *ptOutputBufferHeader);
++
++/**
++ * @brief Handles state transitions for the OMX component.
++ *
++ * This function handles state transitions for the OMX component, moving it from its current state to the specified destination state.
++ *
++ * @param[in] pComp Pointer to the OMX component instance.
++ * @param[in] eDestState The destination state.
++ *
++ * @return OMX_ERRORTYPE Returns an error code indicating the status of the operation.
++ */
++static OMX_ERRORTYPE omx_videobufreader_DoStateSet(OMX_COMPONENTTYPE *pComp, OMX_STATETYPE eDestState);
++
++static OMX_ERRORTYPE omx_videobufreader_Constructor(OMX_COMPONENTTYPE *pComp, OMX_STRING strCompontName)
++{
++	OMX_ERRORTYPE eError = OMX_ErrorNone;
++	omx_videobufreader_Private_T *ptPrivate;
++
++	ptPrivate = (omx_videobufreader_Private_T *)g_malloc0(sizeof(omx_videobufreader_Private_T));
++
++	if(ptPrivate == NULL)
++	{
++		eError = OMX_ErrorInsufficientResources;
++	}
++	else
++	{
++		pComp->pComponentPrivate = (void *)ptPrivate;
++
++		eError = omx_base_source_Constructor(pComp, strCompontName);
++
++		if(eError != OMX_ErrorNone)
++		{
++			DBG_ERR("Failed to omx_base_source_Constructor(%p, %s) -> 0x%x\n", pComp, strCompontName, eError);
++		}
++		else
++		{
++			ptPrivate->sPortTypesParam[0].nStartPortNumber = 0;
++			ptPrivate->sPortTypesParam[0].nPorts = 1;
++
++			ptPrivate->ports = (omx_base_PortType **)g_malloc0(ptPrivate->sPortTypesParam[0].nPorts * sizeof(omx_base_PortType *));
++
++			if(ptPrivate->ports == NULL)
++			{
++				eError = OMX_ErrorInsufficientResources;
++			}
++			else
++			{
++				pComp->SetConfig = omx_videobufreader_SetConfig;
++				pComp->GetConfig = omx_videobufreader_GetConfig;
++				ptPrivate->BufferMgmtCallback 	= omx_videobufreader_BufferMgmtCallback;
++				ptPrivate->DoStateSet			= omx_videobufreader_DoStateSet;
++				ptPrivate->destructor 			= omx_videobufreader_Destructor;
++
++				eError = omx_videobufreader_Constructor_PrivateData(pComp, ptPrivate);
++			}
++		}
++
++		if (eError != OMX_ErrorNone)
++		{
++			(void)omx_videobufreader_Destructor(pComp);
++			g_free(ptPrivate);
++		}
++	}
++
++	return eError;
++}
++
++static OMX_ERRORTYPE omx_videobufreader_Constructor_PrivateData(OMX_COMPONENTTYPE *pComp, omx_videobufreader_Private_T *ptPrivate)
++{
++	OMX_ERRORTYPE eError = OMX_ErrorNone;
++	videobufreader_PrivateData_T *ptPrivateData;
++
++	ptPrivate->pvPrivateData = (void *)g_malloc0(sizeof(videobufreader_PrivateData_T));
++
++	if(ptPrivate->pvPrivateData == NULL)
++	{
++		eError = OMX_ErrorInsufficientResources;
++	}
++	else
++	{
++		ptPrivateData = (videobufreader_PrivateData_T *)ptPrivate->pvPrivateData;
++		ptPrivateData->outputBufferQueue = g_queue_new();
++		ptPrivateData->emptyBufferQueue = g_queue_new();
++		ptPrivateData->allocatedBuffers = g_queue_new();
++
++		tsem_init(&ptPrivateData->tSemConfig, 1);
++	}
++
++	return eError;
++}
++
++static void free_buffer_with_unmap(gpointer data)
++{
++	OMX_Vendor_Common_PrivateData_VideoData_T* videodata = (OMX_Vendor_Common_PrivateData_VideoData_T*)data;
++	if (videodata != NULL)
++	{
++		munmap(videodata->viraddr[0], videodata->allocated_size);
++		g_free(videodata);
++	}
++}
++
++static OMX_ERRORTYPE omx_videobufreader_Destructor(OMX_COMPONENTTYPE *pComp)
++{
++	OMX_ERRORTYPE eError = OMX_ErrorNone;
++	const omx_videobufreader_Private_T *ptPrivate;
++	videobufreader_PrivateData_T *ptPrivateData;
++
++	if(pComp == NULL)
++	{
++		eError = OMX_ErrorBadParameter;
++	}
++	else
++	{
++		ptPrivate = (omx_videobufreader_Private_T *)pComp->pComponentPrivate;
++
++		if(ptPrivate != NULL)
++		{
++			if(ptPrivate->ports != NULL)
++			{
++				if(ptPrivate->ports[0] != NULL)
++				{
++					(void)ptPrivate->ports[0]->PortDestructor(ptPrivate->ports[0]);
++				}
++				g_free(ptPrivate->ports);
++			}
++
++			ptPrivateData = (videobufreader_PrivateData_T *)ptPrivate->pvPrivateData;
++
++			if(ptPrivateData != NULL)
++			{
++				if (ptPrivateData->outputBufferQueue != NULL)
++				{
++					g_queue_free(ptPrivateData->outputBufferQueue);
++					ptPrivateData->outputBufferQueue = NULL;
++				}
++				if (ptPrivateData->emptyBufferQueue != NULL)
++				{
++					g_queue_free(ptPrivateData->emptyBufferQueue);
++					ptPrivateData->emptyBufferQueue = NULL;
++				}
++				if (ptPrivateData->allocatedBuffers != NULL)
++				{
++					g_queue_free_full(ptPrivateData->allocatedBuffers, free_buffer_with_unmap);
++					ptPrivateData->allocatedBuffers = NULL;
++				}
++				tsem_deinit(&ptPrivateData->tSemConfig);
++				g_free(ptPrivateData);
++			}
++			eError = omx_base_source_Destructor(pComp);
++		}
++	}
++	return eError;
++}
++
++static OMX_ERRORTYPE omx_videobufreader_SetConfig(OMX_HANDLETYPE hFx, OMX_INDEXTYPE eConfig, void *pvConfig)
++{
++	OMX_ERRORTYPE eError = OMX_ErrorNone;
++	OMX_COMPONENTTYPE *pComp = (OMX_COMPONENTTYPE *)hFx;
++	const omx_videobufreader_Private_T *ptPrivate = (omx_videobufreader_Private_T *)pComp->pComponentPrivate;
++	videobufreader_PrivateData_T *ptPrivateData = (videobufreader_PrivateData_T *)ptPrivate->pvPrivateData;
++
++	tsem_down(&ptPrivateData->tSemConfig);
++
++	switch(eConfig)
++	{
++	case OMX_IndexVendorConfig_Common_SetCreatePort:
++		{
++			omx_base_PortType *ptPort;
++			const OMX_PARAM_PORTDEFINITIONTYPE *ptPortParam = (OMX_PARAM_PORTDEFINITIONTYPE *)pvConfig;
++
++			if (ptPortParam->eDomain == OMX_PortDomainVideo)
++			{
++				eError = base_video_port_Constructor(hFx, &ptPrivate->ports[OMX_BASE_SOURCE_OUTPUTPORT_INDEX], OMX_BASE_SOURCE_OUTPUTPORT_INDEX, (OMX_BOOL)OMX_FALSE);
++			}
++
++			if(eError != OMX_ErrorNone)
++			{
++				DBG_ERR("failed to port_Constructor");
++				break;
++			}
++
++			ptPort = (omx_base_PortType *)ptPrivate->ports[OMX_BASE_SOURCE_OUTPUTPORT_INDEX];
++			ptPort->sPortParam.nBufferSize 	= ptPortParam->nBufferSize;
++			ptPort->sPortParam.nBufferCountActual = ptPortParam->nBufferCountActual;
++		}
++		break;
++	default:
++		{
++			eError = OMX_ErrorNone;
++		}
++		break;
++	}
++
++	if(eError == OMX_ErrorNone)
++	{
++		eError = omx_videobufreader_SetConfig_videobufreader(hFx, eConfig, pvConfig);
++	}
++
++	tsem_up(&ptPrivateData->tSemConfig);
++
++	return eError;
++}
++
++static OMX_ERRORTYPE omx_videobufreader_SetConfig_videobufreader(OMX_HANDLETYPE hFx, OMX_INDEXTYPE eConfig, void *pvConfig)
++{
++	OMX_ERRORTYPE eError = OMX_ErrorNone;
++	OMX_COMPONENTTYPE *pComp = (OMX_COMPONENTTYPE *)hFx;
++	const omx_videobufreader_Private_T *ptPrivate = (omx_videobufreader_Private_T *)pComp->pComponentPrivate;
++	videobufreader_PrivateData_T *ptPrivateData = (videobufreader_PrivateData_T *)ptPrivate->pvPrivateData;
++
++	switch(eConfig)
++	{
++		case OMX_IndexVendorConfig_VideoBufReader_SetSourceResolution:
++			{
++				const OMX_VendorConfig_Common_Resolution_T *ptResolution = (OMX_VendorConfig_Common_Resolution_T *)pvConfig;
++				(void)memcpy(&ptPrivateData->bufResoution, ptResolution, sizeof(OMX_VendorConfig_Common_Resolution_T));
++				DBG_INFO("set source resolution : %d x %d, w_stride:%d ", ptResolution->size.width, ptResolution->size.height, ptResolution->w_stride);
++			}
++			break;
++
++		case OMX_IndexVendorConfig_VideoBufReader_SetSourceColorFormat:
++			{
++				const OMX_VendorConfig_Common_ColorFormat_T *ptColorFormat = (OMX_VendorConfig_Common_ColorFormat_T *)pvConfig;
++				ptPrivateData->bufColorFormat = ptColorFormat->eColorFormat;
++				DBG_INFO("set source color format %d", ptPrivateData->bufColorFormat);
++			}
++			break;
++
++		case OMX_IndexVendorConfig_VideoBufReader_RequestAllocateBuffer:
++			{
++				OMX_VendorConfig_Common_PhysicalMemInfo *info = (OMX_VendorConfig_Common_PhysicalMemInfo*)pvConfig;
++
++				if (pvConfig == NULL)
++				{
++					DBG_ERR("pvConfig is NULL");
++					eError = OMX_ErrorBadParameter;
++				}
++				else if (ptPrivateData->bufResoution.size.width == 0 || ptPrivateData->bufResoution.size.height == 0)
++				{
++					DBG_ERR("Source resolution is not set. Please to call OMX_IndexVendorConfig_videobufreader_SetSourceResolution");
++					eError = OMX_ErrorInvalidState;
++				}
++				else if (ptPrivateData->bufColorFormat == OMX_COLOR_FormatUnused)
++				{
++					DBG_ERR("Source color format is not set. Please to call OMX_IndexVendorConfig_videobufreader_SetSourceColorFormat");
++					eError = OMX_ErrorInvalidState;
++				}
++				else if (info->base == 0 || info->framesize == 0 || info->nb_frame == 0)
++				{
++					DBG_ERR("Bad parameter");
++					eError = OMX_ErrorBadParameter;
++				}
++				else
++				{
++					int memfd = open("/dev/mem", O_RDWR | O_NDELAY);
++					if (memfd < 0) return OMX_ErrorInsufficientResources;
++
++					DBG_TRACE("Base pysical memory info. base=0x%lx offset=%ld framesize=%d nb_frame=%d",
++						info->base, info->offset, info->framesize, info->nb_frame);
++
++					for (unsigned int i = 0; i < info->nb_frame; i++)
++					{
++						OMX_Vendor_Common_PrivateData_VideoData_T* privVideoData = (OMX_Vendor_Common_PrivateData_VideoData_T*)g_malloc0(sizeof(OMX_Vendor_Common_PrivateData_VideoData_T));
++						uint64_t mem_offset     = info->base + info->offset + (i * info->framesize);
++						uint64_t page_size      = sysconf(_SC_PAGESIZE);
++						uint64_t aligned_offset = mem_offset & ~(page_size - 1);
++
++						void* mmaped_buffer = mmap(NULL,
++												 info->framesize,
++												 PROT_READ | PROT_WRITE,
++												 MAP_SHARED,
++												 memfd,
++												 aligned_offset);
++
++						if (mmaped_buffer == MAP_FAILED)
++						{
++							DBG_ERR("Failed to mmap for framebuffer memory. size=%d, off=%ld errno=%d (%s)",
++								info->framesize, aligned_offset, errno, strerror(errno));
++							eError = OMX_ErrorInsufficientResources;
++							break;
++						}
++						privVideoData->bufferIndex = i;
++						privVideoData->hComponent = hFx;
++						privVideoData->fnDestructor = NULL;
++						privVideoData->phyaddr[0] = aligned_offset;
++						privVideoData->phyaddr[1] = 0;
++						privVideoData->phyaddr[2] = 0;
++						privVideoData->viraddr[0] = mmaped_buffer;
++						privVideoData->viraddr[1] = 0;
++						privVideoData->viraddr[2] = 0;
++						privVideoData->allocated_size = info->framesize;
++						privVideoData->ePrivateData = OMX_Vendor_Common_PrivateData_VideoData;
++						privVideoData->resolution.size.width = ptPrivateData->bufResoution.size.width;
++						privVideoData->resolution.size.height = ptPrivateData->bufResoution.size.height;
++						privVideoData->resolution.w_stride = ptPrivateData->bufResoution.w_stride;
++						privVideoData->colorFormat.eColorFormat = ptPrivateData->bufColorFormat;
++
++						DBG_INFO(" %d : Buffer is allocated. vaddr=%p paddr=0x%lx size=%d",
++							 i, privVideoData->viraddr[0], (unsigned long)privVideoData->phyaddr[0], info->framesize);
++
++						g_queue_push_tail(ptPrivateData->emptyBufferQueue, privVideoData);
++						g_queue_push_tail(ptPrivateData->allocatedBuffers, privVideoData);
++					}
++					close(memfd);
++				}
++			}
++			break;
++
++		case OMX_IndexVendorConfig_VideoBufReader_PushData:
++			{
++				if (pvConfig != NULL)
++				{
++					OMX_Vendor_Common_PrivateData_VideoData_T *ptFilledBuf  = (OMX_Vendor_Common_PrivateData_VideoData_T *)pvConfig;
++					DBG_TRACE("OMX_IndexVendorConfig_videobufreader_PushData : Push buffer(%d,) into Output BufferQ", ptFilledBuf->bufferIndex);
++					g_queue_push_tail(ptPrivateData->outputBufferQueue, ptFilledBuf);
++				}
++				else
++				{
++					eError = OMX_ErrorBadParameter;
++				}
++			}
++			break;
++		case OMX_IndexVendorConfig_VideoBufReader_ReturnUsedBuffer:
++			{
++				if (pvConfig != NULL)
++				{
++					OMX_Vendor_Common_PrivateData_VideoData_T *ptUsedBuf = (OMX_Vendor_Common_PrivateData_VideoData_T *)pvConfig;
++
++					g_queue_push_tail(ptPrivateData->emptyBufferQueue, ptUsedBuf);
++					DBG_TRACE("OMX_IndexVendorConfig_VideoBufReader_ReturnUsedBuffer :Buffer(%d) into Empty BufferQ=%d",
++						ptUsedBuf->bufferIndex, g_queue_get_length(ptPrivateData->emptyBufferQueue));
++				}
++				else
++				{
++					eError = OMX_ErrorBadParameter;
++				}
++			}
++			break;
++		case OMX_IndexVendorConfig_VideoBufReader_SetStart:
++			{
++				ptPrivateData->eState = videobufreader_State_Start;
++			}
++			break;
++
++		case OMX_IndexVendorConfig_VideoBufReader_SetStop:
++			{
++				ptPrivateData->eState = videobufreader_State_Stop;
++			}
++			break;
++
++		default:
++			{
++				eError = OMX_ErrorNone;
++			}
++			break;
++	}
++
++	return eError;
++}
++
++static OMX_ERRORTYPE omx_videobufreader_GetConfig(OMX_HANDLETYPE hFx, OMX_INDEXTYPE eConfig, void *pvConfig)
++{
++	OMX_ERRORTYPE eError = OMX_ErrorNone;
++	const OMX_COMPONENTTYPE *pComp = (OMX_COMPONENTTYPE *)hFx;
++	const omx_videobufreader_Private_T *ptPrivate = (omx_videobufreader_Private_T *)pComp->pComponentPrivate;
++	videobufreader_PrivateData_T *ptPrivateData = (videobufreader_PrivateData_T *)ptPrivate->pvPrivateData;
++
++	tsem_down(&ptPrivateData->tSemConfig);
++
++	switch(eConfig)
++	{
++	case OMX_IndexVendorConfig_VideoBufReader_GetEmptyBuffer:
++		{
++			if (pvConfig != NULL)
++			{
++				OMX_Vendor_Common_PrivateData_VideoData_T **ppBuf = (OMX_Vendor_Common_PrivateData_VideoData_T **)pvConfig;
++				OMX_Vendor_Common_PrivateData_VideoData_T *from_queue = g_queue_pop_head(ptPrivateData->emptyBufferQueue);
++				if (from_queue != NULL)
++				{
++					DBG_TRACE("Got EmptyBuffer from EmptyBufferQueue=%d", g_queue_get_length(ptPrivateData->emptyBufferQueue));
++					*ppBuf = from_queue;
++				}
++				else
++				{
++					eError = OMX_ErrorNotReady;
++				}
++			}
++			else
++			{
++				eError = OMX_ErrorBadParameter;
++			}
++		}
++		break;
++	default:
++		{
++			OMX_INDEXTYPE nIndex = (OMX_INDEXTYPE)eConfig;
++			eError = omx_base_component_GetConfig(hFx, nIndex, pvConfig);
++		}
++		break;
++	}
++
++	tsem_up(&ptPrivateData->tSemConfig);
++
++	return eError;
++}
++
++static void omx_videobufreader_BufferMgmtCallback(OMX_COMPONENTTYPE *pComp, OMX_BUFFERHEADERTYPE *ptOutputBufferHeader)
++{
++	const omx_videobufreader_Private_T *ptPrivate = (omx_videobufreader_Private_T *)pComp->pComponentPrivate;
++	videobufreader_PrivateData_T *ptPrivateData = (videobufreader_PrivateData_T *)ptPrivate->pvPrivateData;
++
++	tsem_down(&ptPrivateData->tSemConfig);
++
++	if((ptPrivateData->eState == videobufreader_State_Stop) || (ptPrivateData->reachEos == (OMX_BOOL)OMX_TRUE))
++	{
++		ptOutputBufferHeader->nFilledLen = 0;
++	}
++	else
++	{
++		OMX_Vendor_Common_PrivateData_VideoData_T *ptQueuedBuf = g_queue_pop_head(ptPrivateData->outputBufferQueue);
++
++		if (ptQueuedBuf != NULL)
++		{
++			DBG_TRACE("Got buffer(%d) from Output Buffer queue", ptQueuedBuf->bufferIndex);
++			ptOutputBufferHeader->nFilledLen  = sizeof(OMX_Vendor_Common_PrivateData_VideoData_T);;
++			ptOutputBufferHeader->pVendorPrivate = ptQueuedBuf;
++			if (ptQueuedBuf->bytesused == 0u)
++			{
++				ptOutputBufferHeader->nFlags |= OMX_BUFFERFLAG_EOS;
++			}
++			DBG_TRACE("Send buffer(%p, len=%ld) to connected component", ptOutputBufferHeader->pBuffer, ptOutputBufferHeader->nFilledLen);
++
++			if ((ptOutputBufferHeader->nFlags & OMX_BUFFERFLAG_EOS) != 0U)
++			{
++				DBG_INFO("Reach EOS");
++				(void)(*(ptPrivate->callbacks->EventHandler))(
++					(OMX_HANDLETYPE)pComp,
++					ptPrivate->callbackData,
++					OMX_EventBufferFlag,
++					ptOutputBufferHeader->nFlags,
++					0,
++					NULL);
++
++				ptPrivateData->reachEos = (OMX_BOOL)OMX_TRUE;
++			}
++		}
++	}
++
++	tsem_up(&ptPrivateData->tSemConfig);
++
++	(void)g_usleep(1000);
++}
++
++static OMX_ERRORTYPE omx_videobufreader_DoStateSet(OMX_COMPONENTTYPE *pComp, OMX_STATETYPE eDestState)
++{
++	OMX_ERRORTYPE eError = OMX_ErrorNone;
++	const omx_videobufreader_Private_T *ptPrivate = (omx_videobufreader_Private_T *)pComp->pComponentPrivate;
++	videobufreader_PrivateData_T *ptPrivateData = (videobufreader_PrivateData_T *)ptPrivate->pvPrivateData;
++
++	if(ptPrivate->state == OMX_StateIdle)
++	{
++		ptPrivateData->reachEos = (OMX_BOOL)OMX_FALSE;
++		ptPrivateData->eState = videobufreader_State_Stop;
++	}
++
++	eError = omx_base_component_DoStateSet(pComp, (OMX_U32)eDestState);
++
++	return eError;
++}
++
++OMX_ERRORTYPE OMX_ComponentInit(OMX_HANDLETYPE hComponent, OMX_STRING pstrCompName)
++{
++	OMX_COMPONENTTYPE* ptComponent = NULL;
++	P_CAST(ptComponent, hComponent);
++
++	return omx_videobufreader_Constructor(ptComponent, pstrCompName);
++}
+\ No newline at end of file
+diff --git a/omx_videoscaler_component/src/omx_videoscaler_component.c b/omx_videoscaler_component/src/omx_videoscaler_component.c
+index 70c761e..1cc4051 100644
+--- a/omx_videoscaler_component/src/omx_videoscaler_component.c
++++ b/omx_videoscaler_component/src/omx_videoscaler_component.c
+@@ -490,6 +490,7 @@ static int videoscaler_fillsource(const ST_VideoScaler_PrivateData_T *ptPrivateD
+ 				}
+ 				break;
+ 
++				case OMX_COLOR_Format24bitRGB888:
+ 				case OMX_COLOR_Format32bitARGB8888:
+ 				{
+ 					phyAddrU = 0;
+@@ -525,6 +526,9 @@ static int videoscaler_fillsource(const ST_VideoScaler_PrivateData_T *ptPrivateD
+ 		case OMX_COLOR_FormatYCbYCr:
+ 			scaler_src->format = DRIVER_IF_FMT_YUYV; //SCALER_YUV422_sq0;
+ 			break;
++		case OMX_COLOR_Format24bitRGB888:
++			scaler_src->format = DRIVER_IF_FMT_RGB24;
++			break;
+ 		case OMX_COLOR_Format32bitARGB8888:
+ 			scaler_src->format = DRIVER_IF_FMT_ARGB32;
+ 			break;
+@@ -539,9 +543,9 @@ static int videoscaler_fillsource(const ST_VideoScaler_PrivateData_T *ptPrivateD
+ 	scaler_src->y = 0U;
+ 	scaler_src->w_x = 0U;
+ 	scaler_src->w_y = 0U;
+-	scaler_src->w = ptPrivateData->srcResoution.w_stride;
++	scaler_src->w = ptPrivateData->srcResoution.size.width;
+ 	scaler_src->h = ptPrivateData->srcResoution.size.height;
+-	scaler_src->w_w = ptPrivateData->srcResoution.w_stride;
++	scaler_src->w_w = ptPrivateData->srcResoution.size.width;
+ 	scaler_src->w_h = ptPrivateData->srcResoution.size.height;
+ 
+ 	//scaler region
+@@ -606,9 +610,9 @@ static int videoscaler_filltarget(const ST_VideoScaler_PrivateData_T *ptPrivateD
+ 	scaler_dst->y = 0U;
+ 	scaler_dst->w_x = 0U;
+ 	scaler_dst->w_y = 0U;
+-	scaler_dst->w = ptPrivateData->tarResoution.w_stride;
++	scaler_dst->w = ptPrivateData->tarResoution.size.width;
+ 	scaler_dst->h = ptPrivateData->tarResoution.size.height;
+-	scaler_dst->w_w = ptPrivateData->tarResoution.w_stride;
++	scaler_dst->w_w = ptPrivateData->tarResoution.size.width;
+ 	scaler_dst->w_h = ptPrivateData->tarResoution.size.height;
+ 
+ 	return ret;
+@@ -807,15 +811,15 @@ static OMX_ERRORTYPE videoscaler_process(OMX_COMPONENTTYPE *ptComponent, OMX_BUF
+ 			char dumpname[1024];
+ 
+ 			memset(dumpname, 0x00, 1024);
+-			sprintf(dumpname, "/opt/data/vscaler_in_%ldx%ld.yuv", ptPrivateData->srcResoution.w_stride, ptPrivateData->srcResoution.size.height);
++			sprintf(dumpname, "/home/root/vscaler_in_%ldx%ld.rgb", ptPrivateData->srcResoution.w_stride, ptPrivateData->srcResoution.size.height);
+ 
+ 			FILE* outdump = fopen(dumpname, "ab+");
+ 			if(outdump)
+ 			{
+ 				TDBG("write input pts:%lld, addr:%x,%x,%x", ptInputBufferHeader->nTimeStamp, srcAddr.viraddr[0], srcAddr.viraddr[1], srcAddr.viraddr[2]);
+-				fwrite(srcAddr.viraddr[0], (ptPrivateData->srcResoution.w_stride * ptPrivateData->srcResoution.size.height), 1, outdump);
+-				fwrite(srcAddr.viraddr[1], (ptPrivateData->srcResoution.w_stride * ptPrivateData->srcResoution.size.height) / 4, 1, outdump);
+-				fwrite(srcAddr.viraddr[2], (ptPrivateData->srcResoution.w_stride * ptPrivateData->srcResoution.size.height) / 4, 1, outdump);
++				fwrite(srcAddr.viraddr[0], (ptPrivateData->srcResoution.w_stride * ptPrivateData->srcResoution.size.height * 3), 1, outdump);
++				//fwrite(srcAddr.viraddr[1], (ptPrivateData->srcResoution.w_stride * ptPrivateData->srcResoution.size.height) / 4, 1, outdump);
++				//fwrite(srcAddr.viraddr[2], (ptPrivateData->srcResoution.w_stride * ptPrivateData->srcResoution.size.height) / 4, 1, outdump);
+ 				fclose(outdump);
+ 				TDBG("write input dump, pts:%lld", ptInputBufferHeader->nTimeStamp);
+ 			}
+@@ -832,17 +836,17 @@ static OMX_ERRORTYPE videoscaler_process(OMX_COMPONENTTYPE *ptComponent, OMX_BUF
+ 			char dumpname[1024];
+ 
+ 			memset(dumpname, 0x00, 1024);
+-			sprintf(dumpname, "/opt/data/vscaler_out_%ldx%ld.yuv", ptPrivateData->tarResoution.w_stride, ptPrivateData->tarResoution.size.height);
++			sprintf(dumpname, "/home/root/vscaler_out_%ldx%ld.yuv", ptPrivateData->tarResoution.w_stride, ptPrivateData->tarResoution.size.height);
+ 
+ 			FILE* outdump = fopen(dumpname, "ab+");
+ 			if(outdump)
+ 			{
+-				TDBG("write output pts:%lld, addr:%x,%x,%x", ptInputBufferHeader->nTimeStamp, dstAddr.viraddr[0], dstAddr.viraddr[1], dstAddr.viraddr[2]);
+-				fwrite(dstAddr.viraddr[0], (ptPrivateData->tarResoution.w_stride * ptPrivateData->tarResoution.size.height), 1, outdump);
++				//TDBG("write output pts:%lld, addr:%x,%x,%x", ptInputBufferHeader->nTimeStamp, dstAddr.viraddr[0], dstAddr.viraddr[1], dstAddr.viraddr[2]);
++				fwrite(dstAddr.viraddr[0], (ptPrivateData->tarResoution.w_stride * ptPrivateData->tarResoution.size.height) * 3 / 2, 1, outdump);
+ 				//fwrite(dstAddr.viraddr[1], (ptPrivateData->tarResoution.w_stride * ptPrivateData->tarResoution.size.height) / 4, 1, outdump);
+ 				//fwrite(dstAddr.viraddr[2], (ptPrivateData->tarResoution.w_stride * ptPrivateData->tarResoution.size.height) / 4, 1, outdump);
+ 				fclose(outdump);
+-				TDBG("write output dump, pts:%lld", ptInputBufferHeader->nTimeStamp);
++				//TDBG("write output dump, pts:%lld", ptInputBufferHeader->nTimeStamp);
+ 			}
+ 		}
+ #endif
+diff --git a/sample_app/CMakeLists.txt b/sample_app/CMakeLists.txt
+index 7e28414..d9ed5a0 100644
+--- a/sample_app/CMakeLists.txt
++++ b/sample_app/CMakeLists.txt
+@@ -1,3 +1,4 @@
+ add_subdirectory(camera_venc_out)
+ add_subdirectory(camera_mix_disp)
+ add_subdirectory(camera_venc_file)
++add_subdirectory(buffer_venc)
+diff --git a/sample_app/buffer_venc/CMakeLists.txt b/sample_app/buffer_venc/CMakeLists.txt
+new file mode 100644
+index 0000000..9cdaebc
+--- /dev/null
++++ b/sample_app/buffer_venc/CMakeLists.txt
+@@ -0,0 +1,27 @@
++SET(BUFFER_VENC "buffer_venc")
++
++SET(SRC_FILES
++	${CMAKE_CURRENT_SOURCE_DIR}/buffer_venc.c
++	)
++
++INCLUDE_DIRECTORIES(${CMAKE_SOURCE_DIR}/omx_include
++					${CMAKE_SOURCE_DIR}/omx_base/include
++					${CMAKE_SOURCE_DIR}/omx_vendor_include
++					${CMAKE_SOURCE_DIR}/drivers/pmap
++					${GLIB2_INCLUDE_DIRS}
++					)
++
++ADD_COMPILE_OPTIONS(-g)
++
++LINK_LIBRARIES(omxbase dl pmap ${GLIB2_LIBRARIES})
++
++ADD_EXECUTABLE(${BUFFER_VENC} ${SRC_FILES})
++
++INSTALL(
++	TARGETS ${BUFFER_VENC}
++	RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
++	LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
++	ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
++	)
++
++SET_TARGET_PROPERTIES(${BUFFER_VENC} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${BINDIR})
+\ No newline at end of file
+diff --git a/sample_app/buffer_venc/buffer_venc.c b/sample_app/buffer_venc/buffer_venc.c
+new file mode 100644
+index 0000000..c5a4542
+--- /dev/null
++++ b/sample_app/buffer_venc/buffer_venc.c
+@@ -0,0 +1,1099 @@
++/*******************************************************************************
++
++*   Copyright (c) Telechips Inc.
++*   TCC Version 1.0
++
++This source code contains confidential information of Telechips.
++
++Any unauthorized use without a written permission of Telechips including not
++limited to re-distribution in source or binary form is strictly prohibited.
++
++This source code is provided "AS IS" and nothing contained in this source code
++shall constitute any express or implied warranty of any kind, including without
++limitation, any warranty of merchantability, fitness for a particular purpose
++or non-infringement of any patent, copyright or other third party intellectual
++property right.
++No warranty is made, express or implied, regarding the information's accuracy,
++completeness, or performance.
++
++In no event shall Telechips be liable for any claim, damages or other
++liability arising from, out of or in connection with this source code or
++the use in the source code.
++
++This source code is provided subject to the terms of a Mutual Non-Disclosure
++Agreement between Telechips and Company.
++*
++*******************************************************************************/
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <pthread.h>
++#include <unistd.h>
++#include <time.h>
++#include <dlfcn.h>
++#include <sys/epoll.h>
++#include <limits.h>
++#include <fcntl.h>
++#include <sys/types.h>
++#include <sys/stat.h>
++#include <errno.h>
++#include <sys/mman.h>
++
++#include "tu_buffer.h"
++#include <glib.h>
++#include <pmap.h>
++#include <OMX_Core.h>
++#include <OMX_Index.h>
++#include <OMX_Component.h>
++#include <OMX_Types.h>
++#include <OMX_VendorCommon.h>
++#include <OMX_VendorVideoEnc.h>
++#include <tsemaphore.h>
++#include <omx_base_component.h>
++
++#define VREADER_PMAPNAME 	("fb_wmixer")
++#define VSCALER_DEVNMAE 	("/dev/scaler3")
++#define VSCALER_PMAPNAME 	("overlay2")
++
++#define BUFFER_IMG_WIDTH 	(1920)
++#define BUFFER_IMG_HEIGHT 	(1080)
++#define BUFFER_IMG_FORMAT 	(OMX_COLOR_Format24bitRGB888) // RGB888 24bit
++#define BUFFER_IMG_FRAME_SIZE (BUFFER_IMG_WIDTH * BUFFER_IMG_HEIGHT * 3)
++
++#define VID_WIDTH 		(1920)
++#define VID_HEIGHT 		(1080)
++#define VID_FORMAT 		(OMX_COLOR_FormatYUV420Planar) // YUV420p (fixed)
++#define VID_BITRATE 	(4 * 1000 * 1000) // 4Mbps
++#define VID_GOP 		(10)
++#define VID_FPS 		(30)
++
++#define DBG(fmt, args...) \
++			do { \
++				struct timespec _now;    \
++				struct tm _tm;	\
++				clock_gettime(CLOCK_REALTIME, &_now); 	\
++				localtime_r(&_now.tv_sec, &_tm);	 \
++				printf("[%04d-%02d-%02d %02d:%02d:%02d.%03ld][%s:%d]" fmt "\n", _tm.tm_year + 1900, _tm.tm_mon+1, _tm.tm_mday, _tm.tm_hour, _tm.tm_min, _tm.tm_sec, _now.tv_nsec/1000000, __FUNCTION__, __LINE__, ## args); \
++			}while(0)
++
++typedef void *IL_handle;
++
++typedef struct
++{
++	void *hvHandle;
++
++	struct
++	{
++		OMX_ERRORTYPE (*init)(void);
++		OMX_ERRORTYPE (*deinit)(void);
++		OMX_ERRORTYPE (*get_handle)(OMX_HANDLETYPE *handle, const char* name, OMX_PTR data, OMX_CALLBACKTYPE *callbacks);
++		OMX_ERRORTYPE (*free_handle)(OMX_HANDLETYPE handle);
++		OMX_ERRORTYPE (*setup_tunnel)(OMX_HANDLETYPE output, OMX_U32 outport, OMX_HANDLETYPE input, OMX_U32 inport);
++	} sym;
++} Omx_Core_T;
++
++typedef struct VideoReader_T
++{
++	bool isRunning;
++	pthread_t hThread;
++	GQueue *save_queue;
++	GMutex queue_mutex;
++	GCond queue_cond;
++	FILE* dump_fp;
++} VideoReader_T;
++
++typedef struct buffervencData_T
++{
++	OMX_HANDLETYPE handle_reader;
++	OMX_HANDLETYPE handle_vidscaler;
++	OMX_HANDLETYPE handle_videnc;
++	OMX_HANDLETYPE handle_fakesink;
++	tsem_t sem_reader;
++	tsem_t sem_vidscaler;
++	tsem_t sem_videnc;
++	tsem_t sem_fakesink;
++	Omx_Core_T omxcore;
++	VideoReader_T videoReader;
++} buffervencData_T;
++
++static void* save_file_thread(void* priv);
++
++static void eventhandlerCommon(OMX_HANDLETYPE component_handle,
++	OMX_PTR pAppData, OMX_EVENTTYPE eEvent,OMX_U32 nData1, OMX_U32 nData2, OMX_PTR pEventData, tsem_t *sema);
++static OMX_ERRORTYPE eventhandlerReader(OMX_HANDLETYPE component_handle,
++	OMX_PTR pAppData, OMX_EVENTTYPE eEvent, OMX_U32 nData1, OMX_U32 nData2, OMX_PTR pEventData);
++static OMX_ERRORTYPE eventhandlerVidScaler(OMX_HANDLETYPE component_handle,
++	OMX_PTR pAppData, OMX_EVENTTYPE eEvent, OMX_U32 nData1, OMX_U32 nData2, OMX_PTR pEventData);
++static OMX_ERRORTYPE eventhandlerVidenc(OMX_HANDLETYPE component_handle,
++	OMX_PTR pAppData, OMX_EVENTTYPE eEvent, OMX_U32 nData1, OMX_U32 nData2, OMX_PTR pEventData);
++static OMX_ERRORTYPE eventhandlerFakeSink(OMX_HANDLETYPE component_handle,
++	OMX_PTR pAppData, OMX_EVENTTYPE eEvent, OMX_U32 nData1, OMX_U32 nData2, OMX_PTR pEventData);
++
++static OMX_ERRORTYPE emptyBufferDone(OMX_HANDLETYPE component_handle, OMX_PTR pAppData, OMX_BUFFERHEADERTYPE *pBuffer);
++static OMX_ERRORTYPE emptyBufferDoneVscaler(OMX_HANDLETYPE component_handle, OMX_PTR pAppData, OMX_BUFFERHEADERTYPE *pBuffer);
++static OMX_ERRORTYPE fillBufferDoneVenc(OMX_HANDLETYPE component_handle, OMX_PTR pAppData, OMX_BUFFERHEADERTYPE *pBuffer);
++
++static OMX_CALLBACKTYPE callback_reader = {eventhandlerReader, NULL, NULL};
++static OMX_CALLBACKTYPE callback_vidscaler = {eventhandlerVidScaler, emptyBufferDoneVscaler, NULL};
++static OMX_CALLBACKTYPE callback_videnc = {eventhandlerVidenc, emptyBufferDone, fillBufferDoneVenc};
++static OMX_CALLBACKTYPE callback_fakesink = {eventhandlerFakeSink, NULL, NULL};
++
++static buffervencData_T* LoadOmxcore(void);
++static void UnLoadOmxcore(buffervencData_T *ctx);
++static OMX_ERRORTYPE CreateComponents(IL_handle handle);
++static OMX_ERRORTYPE ConfigureComponents(IL_handle handle);
++static void DestroyComponents(IL_handle handle);
++static OMX_ERRORTYPE CreatePipeline(IL_handle handle);
++static OMX_ERRORTYPE StartPipeline(IL_handle handle);
++static OMX_ERRORTYPE StopPipeline(IL_handle handle);
++static void DestroyPipeline(IL_handle handle);
++static void Push_rgb_frames(IL_handle handle, char* source_file_name);
++
++static OMX_ERRORTYPE setStateToIdle(buffervencData_T *ctx);
++static OMX_ERRORTYPE setStateToload(buffervencData_T *ctx);
++static OMX_ERRORTYPE set_config(OMX_HANDLETYPE component_handle, OMX_INDEXTYPE index, OMX_PTR config_structure);
++static OMX_ERRORTYPE get_config(OMX_HANDLETYPE component_handle, OMX_INDEXTYPE index, OMX_PTR config_structure);
++static OMX_ERRORTYPE send_command(OMX_HANDLETYPE component_handle, OMX_COMMANDTYPE cmd, OMX_U32 param, OMX_PTR cmd_data);
++
++static bool g_end_of_stream = false;
++static bool g_loop = false;
++
++int main(int argc, char *argv[])
++{
++	OMX_ERRORTYPE eError = OMX_ErrorNone;
++	IL_handle handle = NULL;
++
++	if (argc < 2)
++	{
++		fprintf(stderr, "Usage: %s [rgb_file.rgb]\n", argv[0]);
++		return EXIT_FAILURE;
++	}
++
++	for (int i = 1; i < argc; ++i)
++	{
++		if (strcmp(argv[i], "--loop") == 0)
++		{
++			g_loop = true;
++		}
++	}
++
++	handle = (IL_handle)LoadOmxcore();
++
++	if (handle != NULL)
++	{
++		eError = CreateComponents(handle);
++
++		if(eError != OMX_ErrorNone)
++		{
++			printf("[%s:%d] Failed to create omx components.", __func__, __LINE__);
++			return 0;
++		}
++
++		eError = ConfigureComponents(handle);
++
++		if(eError != OMX_ErrorNone)
++		{
++			printf("[%s:%d] Failed to configure omx components.", __func__, __LINE__);
++			return 0;
++		}
++
++		eError = CreatePipeline(handle);
++
++		if(eError != OMX_ErrorNone)
++		{
++			printf("[%s:%d] Failed to create pipeline.", __func__, __LINE__);
++			return 0;
++		}
++
++		eError = StartPipeline(handle);
++
++		if(eError != OMX_ErrorNone)
++		{
++			printf("[%s:%d] Failed to start pipeline.", __func__, __LINE__);
++			return 0;
++		}
++
++		printf("Start video encoding \n");
++		Push_rgb_frames(handle, argv[1]);
++
++		eError = StopPipeline(handle);
++		if(eError != OMX_ErrorNone)
++		{
++			printf("[%s:%d] Failed to stop pipeline.", __func__, __LINE__);
++			return 0;
++		}
++
++		printf("Stop video encoding \n");
++
++		DestroyPipeline(handle);
++		DestroyComponents(handle);
++		UnLoadOmxcore(handle);
++
++		printf("Bye!!\n");
++	}
++	return 0;
++}
++
++static void eventhandlerCommon(OMX_HANDLETYPE component_handle,
++										OMX_PTR pAppData, OMX_EVENTTYPE eEvent,
++										OMX_U32 nData1, OMX_U32 nData2, OMX_PTR pEventData,
++										tsem_t *sema)
++{
++	switch (eEvent)
++	{
++	case OMX_EventCmdComplete:
++		{
++			OMX_COMMANDTYPE cmd = (OMX_COMMANDTYPE)nData1;
++			OMX_STATETYPE state = (OMX_STATETYPE)nData2;
++
++			if (cmd == OMX_CommandStateSet)
++			{
++				if ((state == OMX_StateLoaded) || (state == OMX_StateIdle)
++					|| (state == OMX_StateExecuting)/* || (state == OMX_StatePause)*/)
++				{
++					(void)tsem_up(sema);
++				}
++			}
++			else if (cmd == OMX_CommandFlush)
++			{
++				OMX_VendorConfig_Common_Flush_T tFlush;
++				tFlush.iPortIdx = nData2;
++				(void)set_config(component_handle, OMX_IndexVendorConfig_Common_SetFlushComplete, &tFlush);
++				(void)tsem_up(sema);
++			}
++			else
++			{
++				;
++			}
++		}
++		break;
++	case OMX_EventError:
++		{
++			OMX_ERRORTYPE err = (OMX_ERRORTYPE)nData1;
++
++			if (err == OMX_ErrorSameState)
++			{
++				(void)tsem_up(sema);
++			}
++		}
++		break;
++	case OMX_EventBufferFlag:
++		{
++			if(nData2 & OMX_BUFFERFLAG_EOS)
++			{
++				(void)tsem_up(sema);
++			}
++			break;
++		}
++	default:
++		{
++			// do nothing
++		}
++		break;
++	}
++}
++
++static OMX_ERRORTYPE eventhandlerReader(OMX_HANDLETYPE component_handle,
++										OMX_PTR pAppData, OMX_EVENTTYPE eEvent,
++										OMX_U32 nData1, OMX_U32 nData2, OMX_PTR pEventData
++										)
++{
++	OMX_ERRORTYPE eError = OMX_ErrorNone;
++
++	buffervencData_T *ctx = (buffervencData_T *)pAppData;
++
++	if (ctx == NULL)
++	{
++		eError = OMX_ErrorBadParameter;
++	}
++	else
++	{
++		eventhandlerCommon(component_handle, pAppData, eEvent, nData1, nData2, pEventData, &ctx->sem_reader);
++	}
++
++	return eError;
++}
++
++static OMX_ERRORTYPE eventhandlerVidScaler(OMX_HANDLETYPE component_handle,
++										OMX_PTR pAppData, OMX_EVENTTYPE eEvent,
++										OMX_U32 nData1, OMX_U32 nData2, OMX_PTR pEventData
++										)
++{
++	OMX_ERRORTYPE eError = OMX_ErrorNone;
++
++	buffervencData_T *ctx = (buffervencData_T *)pAppData;
++
++	if (ctx == NULL)
++	{
++		eError = OMX_ErrorBadParameter;
++	}
++	else
++	{
++		eventhandlerCommon(component_handle, pAppData, eEvent, nData1, nData2, pEventData, &ctx->sem_vidscaler);
++	}
++
++	return eError;
++}
++
++static OMX_ERRORTYPE eventhandlerVidenc(OMX_HANDLETYPE component_handle,
++										OMX_PTR pAppData, OMX_EVENTTYPE eEvent,
++										OMX_U32 nData1, OMX_U32 nData2, OMX_PTR pEventData
++										)
++{
++	OMX_ERRORTYPE eError = OMX_ErrorNone;
++
++	buffervencData_T *ctx = (buffervencData_T *)pAppData;
++
++	if (ctx == NULL)
++	{
++		eError = OMX_ErrorBadParameter;
++	}
++	else
++	{
++		if ((eEvent == OMX_EventBufferFlag) && (nData1 & OMX_BUFFERFLAG_EOS))
++		{
++			DBG("Received EOS");
++			g_end_of_stream = true;
++		}
++		else
++		{
++			eventhandlerCommon(component_handle, pAppData, eEvent, nData1, nData2, pEventData, &ctx->sem_videnc);
++		}
++	}
++
++	return eError;
++}
++
++static OMX_ERRORTYPE eventhandlerFakeSink(OMX_HANDLETYPE component_handle,
++										OMX_PTR pAppData, OMX_EVENTTYPE eEvent,
++										OMX_U32 nData1, OMX_U32 nData2, OMX_PTR pEventData
++										)
++{
++	OMX_ERRORTYPE eError = OMX_ErrorNone;
++
++	buffervencData_T *ctx = (buffervencData_T *)pAppData;
++
++	if (ctx == NULL)
++	{
++		eError = OMX_ErrorBadParameter;
++	}
++	else
++	{
++		eventhandlerCommon(component_handle, pAppData, eEvent, nData1, nData2, pEventData, &ctx->sem_fakesink);
++	}
++
++	return eError;
++}
++
++static OMX_ERRORTYPE emptyBufferDone(OMX_HANDLETYPE component_handle, OMX_PTR pAppData, OMX_BUFFERHEADERTYPE *pBuffer)
++{
++	OMX_ERRORTYPE eError = OMX_ErrorNone;
++	OMX_Vendor_Common_PrivateData_T *vendorData;
++
++	if(pBuffer != NULL)
++	{
++		vendorData = pBuffer->pVendorPrivate;
++		if(vendorData != NULL)
++		{
++			if(vendorData->fnDestructor != NULL)
++			{
++				(void)vendorData->fnDestructor(pBuffer->pVendorPrivate);
++			}
++			else
++			{
++				free(pBuffer->pVendorPrivate);
++			}
++		}
++	}
++	else
++	{
++		eError = OMX_ErrorBadParameter;
++	}
++	return eError;
++}
++
++static OMX_ERRORTYPE emptyBufferDoneVscaler(OMX_HANDLETYPE component_handle, OMX_PTR pAppData, OMX_BUFFERHEADERTYPE *pBuffer)
++{
++	OMX_ERRORTYPE eError = OMX_ErrorNone;
++	buffervencData_T* ctx = (buffervencData_T *)pAppData;
++	OMX_Vendor_Common_PrivateData_VideoData_T* videodata = NULL;
++
++	if(pBuffer != NULL)
++	{
++		videodata = (OMX_Vendor_Common_PrivateData_VideoData_T*)pBuffer->pVendorPrivate;
++		eError = set_config(ctx->handle_reader, OMX_IndexVendorConfig_VideoBufReader_ReturnUsedBuffer, videodata);
++	}
++	else
++	{
++		eError = OMX_ErrorBadParameter;
++	}
++	return eError;
++}
++
++static OMX_ERRORTYPE fillBufferDoneVenc(OMX_HANDLETYPE component_handle, OMX_PTR pAppData, OMX_BUFFERHEADERTYPE *pBuffer)
++{
++	buffervencData_T* ctx = (buffervencData_T*)pAppData;
++	VideoReader_T* pReader = &ctx->videoReader;
++
++	if ((pBuffer != NULL) && (pBuffer->nFilledLen > 0))
++	{
++		g_mutex_lock(&pReader->queue_mutex);
++
++		OMX_BUFFERHEADERTYPE *saved_buf = g_malloc0(sizeof(OMX_BUFFERHEADERTYPE));
++		memcpy(saved_buf, pBuffer, sizeof(OMX_BUFFERHEADERTYPE));
++		saved_buf->pBuffer = g_malloc(pBuffer->nFilledLen);
++
++		memcpy(saved_buf->pBuffer, pBuffer->pBuffer, pBuffer->nFilledLen);
++
++		g_queue_push_tail(pReader->save_queue, saved_buf);
++		g_cond_signal(&pReader->queue_cond);
++
++		g_mutex_unlock(&pReader->queue_mutex);
++	}
++	return OMX_ErrorNone;
++}
++
++static OMX_ERRORTYPE send_command(
++	OMX_HANDLETYPE component_handle, OMX_COMMANDTYPE cmd, OMX_U32 param, OMX_PTR cmd_data)
++{
++	OMX_ERRORTYPE err = OMX_ErrorBadParameter;
++
++	if((component_handle != NULL) && (((OMX_COMPONENTTYPE *)component_handle)->SendCommand != NULL))
++	{
++		err = ((OMX_COMPONENTTYPE *)component_handle)->SendCommand(component_handle, cmd, param, cmd_data);
++	}
++	return err;
++}
++
++static OMX_ERRORTYPE set_config(OMX_HANDLETYPE component_handle, OMX_INDEXTYPE index, OMX_PTR config_structure)
++{
++	OMX_ERRORTYPE err = OMX_ErrorBadParameter;
++
++	if((component_handle != NULL) && (((OMX_COMPONENTTYPE *)component_handle)->SetConfig != NULL))
++	{
++		err = ((OMX_COMPONENTTYPE *)component_handle)->SetConfig(component_handle, index, config_structure);
++	}
++
++	return err;
++}
++
++static OMX_ERRORTYPE get_config(
++	OMX_HANDLETYPE component_handle, OMX_INDEXTYPE index, OMX_INOUT OMX_PTR config_structure)
++{
++	OMX_ERRORTYPE err = OMX_ErrorBadParameter;
++
++	if((component_handle != NULL) && (((OMX_COMPONENTTYPE *)component_handle)->GetConfig != NULL) && (config_structure != NULL))
++	{
++		err = ((OMX_COMPONENTTYPE *)component_handle)->GetConfig(component_handle, index, config_structure);
++	}
++
++	return err;
++}
++
++static buffervencData_T* LoadOmxcore(void)
++{
++	Omx_Core_T *omx_core;
++
++	buffervencData_T *ctx;
++
++	ctx = (buffervencData_T *)calloc(1, sizeof(buffervencData_T));
++
++	DBG("Loading omx core");
++
++	if (ctx == NULL)
++	{
++		return NULL;
++	}
++
++	omx_core = &ctx->omxcore;
++
++	omx_core->hvHandle = dlopen("libtcc_omxcore.so", RTLD_LAZY);
++
++	if (omx_core->hvHandle == NULL)
++	{
++		free(ctx);
++		printf("Failed to open shared object : [reason : %s]\n", dlerror());
++		return NULL;
++	}
++	else
++	{
++		omx_core->sym.init = dlsym(omx_core->hvHandle, "OMX_Init");
++		if (omx_core->sym.init == NULL)
++		{
++			(void)dlclose(omx_core->hvHandle);
++			omx_core->hvHandle = NULL;
++			free(ctx);
++			return NULL;
++		}
++		omx_core->sym.deinit 			= dlsym(omx_core->hvHandle, "OMX_Deinit");
++		if (omx_core->sym.deinit == NULL)
++		{
++			(void)dlclose(omx_core->hvHandle);
++			omx_core->hvHandle = NULL;
++			free(ctx);
++			return NULL;
++		}
++		omx_core->sym.get_handle 		= dlsym(omx_core->hvHandle, "OMX_GetHandle");
++		if (omx_core->sym.get_handle == NULL)
++		{
++			(void)dlclose(omx_core->hvHandle);
++			omx_core->hvHandle = NULL;
++			free(ctx);
++			return NULL;
++		}
++		omx_core->sym.free_handle 		= dlsym(omx_core->hvHandle, "OMX_FreeHandle");
++		if (omx_core->sym.free_handle == NULL)
++		{
++			(void)dlclose(omx_core->hvHandle);
++			omx_core->hvHandle = NULL;
++			free(ctx);
++			return NULL;
++		}
++		omx_core->sym.setup_tunnel 	= dlsym(omx_core->hvHandle, "OMX_SetupTunnel");
++		if (omx_core->sym.setup_tunnel == NULL)
++		{
++			(void)dlclose(omx_core->hvHandle);
++			omx_core->hvHandle = NULL;
++			free(ctx);
++			return NULL;
++		}
++
++		omx_core->sym.init;
++
++		DBG("Success. omx core is loaded.");
++
++		return ctx;
++	}
++}
++
++static void UnLoadOmxcore(buffervencData_T *ctx)
++{
++	Omx_Core_T *omx_core;
++	DBG("UnLoading omx core");
++
++	if (ctx != NULL)
++	{
++		omx_core = &ctx->omxcore;
++		omx_core->sym.deinit();
++		(void)dlclose(omx_core->hvHandle);
++		free(ctx);
++	}
++	DBG("Success. omx core is unloaded.");
++}
++
++static OMX_ERRORTYPE setState(buffervencData_T *ctx, OMX_U32 state)
++{
++	OMX_ERRORTYPE eError = OMX_ErrorNone;
++
++	if (ctx == NULL)
++	{
++		eError = OMX_ErrorBadParameter;
++	}
++	else
++	{
++		(void)send_command(ctx->handle_reader, OMX_CommandStateSet, state, NULL);
++		(void)send_command(ctx->handle_vidscaler, OMX_CommandStateSet, state, NULL);
++		(void)send_command(ctx->handle_videnc, OMX_CommandStateSet, state, NULL);
++		(void)send_command(ctx->handle_fakesink, OMX_CommandStateSet, state, NULL);
++		DBG("Wait for reader ");
++		(void)tsem_down(&ctx->sem_reader);
++		DBG("Wait for vidscaler ");
++		(void)tsem_down(&ctx->sem_vidscaler);
++		DBG("Wait for videnc ");
++		(void)tsem_down(&ctx->sem_videnc);
++		DBG("Wait for fakesink ");
++		(void)tsem_down(&ctx->sem_fakesink);
++	}
++
++	return eError;
++}
++
++static OMX_ERRORTYPE setStateToIdle(buffervencData_T *ctx)
++{
++	return setState(ctx, (OMX_U32)OMX_StateIdle);
++}
++
++static OMX_ERRORTYPE setStateToload(buffervencData_T *ctx)
++{
++	return setState(ctx, (OMX_U32)OMX_StateLoaded);
++}
++
++static OMX_ERRORTYPE setStateToExecute(buffervencData_T *ctx)
++{
++	return setState(ctx, (OMX_U32)OMX_StateExecuting);
++}
++
++static OMX_ERRORTYPE setStateToPause(buffervencData_T *ctx)
++{
++	return setState(ctx, (OMX_U32)OMX_StatePause);
++}
++
++static OMX_ERRORTYPE CreateComponents(IL_handle handle)
++{
++	Omx_Core_T *omx_core;
++	buffervencData_T* ctx = (buffervencData_T*)handle;
++
++	OMX_ERRORTYPE eError = OMX_ErrorNone;
++
++	DBG("Creating omx components");
++
++	if (ctx == NULL)
++	{
++		eError = OMX_ErrorBadParameter;
++	}
++	else
++	{
++		omx_core = &ctx->omxcore;
++
++		tsem_init(&ctx->sem_reader, 0);
++		tsem_init(&ctx->sem_videnc, 0);
++		tsem_init(&ctx->sem_fakesink, 0);
++
++		eError = omx_core->sym.get_handle(&ctx->handle_reader, "OMX.TCC.videobufreader", (OMX_PTR)ctx, &callback_reader);
++
++		if(eError != OMX_ErrorNone)
++		{
++			printf("[%s:%d] Failed get handle. reader component\n", __func__, __LINE__);
++			return eError;
++		}
++
++		eError = omx_core->sym.get_handle(&ctx->handle_vidscaler, "OMX.TCC.videoscaler", (OMX_PTR)ctx, &callback_vidscaler);
++
++		if(eError != OMX_ErrorNone)
++		{
++			printf("[%s:%d] Failed get handle. video scaler component\n", __func__, __LINE__);
++			return eError;
++		}
++
++		eError = omx_core->sym.get_handle(&ctx->handle_videnc, "OMX.TCC.h265enc", (OMX_PTR)ctx, &callback_videnc);
++
++		if(eError != OMX_ErrorNone)
++		{
++			printf("[%s:%d] Failed get handle. video encoder component\n", __func__, __LINE__);
++			return eError;
++		}
++
++		eError = omx_core->sym.get_handle(&ctx->handle_fakesink, "OMX.TCC.fakesink", (OMX_PTR)ctx, &callback_fakesink);
++
++		if(eError != OMX_ErrorNone)
++		{
++			printf("[%s:%d] Failed get handle. fakesink component\n", __func__, __LINE__);
++			return eError;
++		}
++	}
++
++	DBG("Success. omx components are created.");
++
++	return eError;
++}
++
++static void DestroyComponents(IL_handle handle)
++{
++	Omx_Core_T *omx_core;
++	buffervencData_T* ctx = (buffervencData_T*)handle;
++
++	if (ctx != NULL)
++	{
++		omx_core = &ctx->omxcore;
++
++		DBG("free reader");
++		if (ctx->handle_reader != NULL)
++		{
++			omx_core->sym.free_handle(ctx->handle_reader);
++			ctx->handle_reader = NULL;
++		}
++		DBG("free vidscaler");
++
++		if (ctx->handle_vidscaler != NULL)
++		{
++			omx_core->sym.free_handle(ctx->handle_vidscaler);
++			ctx->handle_vidscaler = NULL;
++		}
++		DBG("free videnc");
++		if (ctx->handle_videnc != NULL)
++		{
++			omx_core->sym.free_handle(ctx->handle_videnc);
++			ctx->handle_videnc = NULL;
++		}
++#if 0
++		DBG("free fakesink");
++		if (ctx->handle_fakesink != NULL)
++		{
++			omx_core->sym.free_handle(ctx->handle_fakesink);
++			ctx->handle_fakesink = NULL;
++		}
++#endif
++		tsem_deinit(&ctx->sem_reader);
++		tsem_deinit(&ctx->sem_vidscaler);
++		tsem_deinit(&ctx->sem_videnc);
++		tsem_deinit(&ctx->sem_fakesink);
++	}
++}
++
++static OMX_ERRORTYPE CreatePipeline(IL_handle handle)
++{
++	OMX_ERRORTYPE eError = OMX_ErrorNone;
++	buffervencData_T *ctx = (buffervencData_T *)handle;
++	OMX_PARAM_PORTDEFINITIONTYPE port_def;
++	Omx_Core_T* omx_core;
++
++	DBG("Creating pipeline");
++
++	if (ctx == NULL)
++	{
++		return OMX_ErrorBadParameter;
++	}
++
++	omx_core = &ctx->omxcore;
++
++	(void)memset(&port_def, 0, sizeof(OMX_PARAM_PORTDEFINITIONTYPE));
++	setHeader(&port_def, sizeof(OMX_PARAM_PORTDEFINITIONTYPE));
++
++	DBG("Create ports on each components");
++	port_def.eDomain = OMX_PortDomainVideo;
++	port_def.nBufferCountActual = 4;
++	port_def.nBufferCountMin = 4;
++	port_def.nPortIndex = 0;
++	(void)set_config(ctx->handle_reader, OMX_IndexVendorConfig_Common_SetCreatePort, &port_def);
++
++	port_def.nPortIndex = 0;
++	(void)set_config(ctx->handle_vidscaler, OMX_IndexVendorConfig_Common_SetCreatePort, &port_def);
++	port_def.nPortIndex = 1;
++	(void)set_config(ctx->handle_vidscaler, OMX_IndexVendorConfig_Common_SetCreatePort, &port_def);
++
++	port_def.nPortIndex = 0;
++	(void)set_config(ctx->handle_videnc, OMX_IndexVendorConfig_Common_SetCreatePort, &port_def);
++	port_def.nPortIndex = 1;
++	(void)set_config(ctx->handle_videnc, OMX_IndexVendorConfig_Common_SetCreatePort, &port_def);
++
++	port_def.nPortIndex = 0;
++	(void)set_config(ctx->handle_fakesink, OMX_IndexVendorConfig_Common_SetCreatePort, &port_def);
++
++	DBG("Connect components");
++	eError = omx_core->sym.setup_tunnel(ctx->handle_reader, 0, ctx->handle_vidscaler, 0);
++
++	if(eError != OMX_ErrorNone)
++	{
++		DBG("Failed to connect reader - video scaler component. err=0x%x", eError);
++		return eError;
++	}
++
++	eError = omx_core->sym.setup_tunnel(ctx->handle_vidscaler, 1, ctx->handle_videnc, 0);
++
++	if(eError != OMX_ErrorNone)
++	{
++		DBG("Failed to connect video scaler - video enc component. err=0x%x", eError);
++		return eError;
++	}
++
++	eError = omx_core->sym.setup_tunnel(ctx->handle_videnc, 1, ctx->handle_fakesink, 0);
++
++	if(eError != OMX_ErrorNone)
++	{
++		DBG("Failed to connect video enc - fakesink component. err=0x%x", eError);
++		return eError;
++	}
++
++	DBG("Set omx state into Loaded -> IDLE");
++	eError = setStateToIdle(ctx);
++
++	if(eError != OMX_ErrorNone)
++	{
++		DBG("Failed to set state into IDLE");
++		return eError;
++	}
++
++	DBG("Success. pipeline is created");
++
++	return eError;
++}
++
++static void DestroyPipeline(IL_handle handle)
++{
++	buffervencData_T *ctx = (buffervencData_T *)handle;
++
++	DBG("Destroying pipeline");
++
++	if (ctx != NULL)
++	{
++		setStateToload(ctx);
++	}
++	DBG("Success. pipeline is destroyed");
++}
++
++static OMX_ERRORTYPE StartPipeline(IL_handle handle)
++{
++	OMX_ERRORTYPE eError = OMX_ErrorNone;
++	buffervencData_T *ctx = (buffervencData_T *)handle;
++	time_t timer;
++	struct tm *t;
++	char dump_time[64];
++	char dumppath[1024];
++
++	DBG("Starting pipeline");
++
++	memset(dump_time, 0x00, 64);
++
++	timer = time(NULL);
++	t = localtime(&timer);
++	sprintf(dump_time, "%04d%02d%02d_%02d%02d%02d", t->tm_year +1900, t->tm_mon+1, t->tm_mday,  t->tm_hour, t->tm_min, t->tm_sec);
++	DBG("date: %s", dump_time);
++
++	ctx->videoReader.isRunning = true;
++	sprintf(dumppath, "/home/root/video_%s.hevc", dump_time);
++	ctx->videoReader.dump_fp = fopen(dumppath, "wb");
++	if (!ctx->videoReader.dump_fp)
++	{
++		perror("Failed to open hevc dump file");
++		eError = OMX_ErrorHardware;
++	}
++	else
++	{
++		ctx->videoReader.save_queue = g_queue_new();
++		g_mutex_init(&ctx->videoReader.queue_mutex);
++		g_cond_init(&ctx->videoReader.queue_cond);
++
++		pthread_create(&ctx->videoReader.hThread, NULL, save_file_thread, &ctx->videoReader);
++
++		eError = setStateToExecute((buffervencData_T *)handle);
++		if (eError != OMX_ErrorNone)
++		{
++			DBG("Failed to set excute state");
++		}
++		else
++		{
++			DBG("Success. pipeline is started.");
++		}
++	}
++	return eError;
++}
++
++static OMX_ERRORTYPE StopPipeline(IL_handle handle)
++{
++	OMX_ERRORTYPE eError = OMX_ErrorNone;
++	buffervencData_T *ctx = (buffervencData_T *)handle;
++
++	DBG("Stopping pipeline");
++	(void)OMX_SetConfig(ctx->handle_reader, OMX_IndexVendorConfig_VideoBufReader_SetStop, NULL);
++
++	if(ctx->videoReader.isRunning)
++	{
++		DBG("video reader thread finish!!, wait to join...");
++		ctx->videoReader.isRunning = false;
++		g_mutex_lock(&ctx->videoReader.queue_mutex);
++		g_cond_signal(&ctx->videoReader.queue_cond);
++		g_mutex_unlock(&ctx->videoReader.queue_mutex);
++		pthread_join(ctx->videoReader.hThread, NULL);
++		DBG("video reader thread finished!!");
++	}
++
++	eError = setStateToIdle((buffervencData_T *)handle);
++
++	DBG("Success. pipeline is stopped.");
++
++	return eError;
++}
++
++static OMX_ERRORTYPE ConfigureComponents(IL_handle handle)
++{
++	buffervencData_T *ctx = (buffervencData_T *)handle;
++	OMX_ERRORTYPE eError = OMX_ErrorNone;
++
++	OMX_VendorConfig_VideoEnc_Resolution_T tVidencRes;
++	OMX_VendorConfig_VideoEnc_FrameRate_T tVidencFPS;
++	OMX_VendorConfig_VideoEnc_ColorFormat_T tVidencColorFormat;
++	OMX_VendorConfig_VideoEnc_Bitrate_T tVidencBitrate;
++	OMX_VendorConfig_VideoEnc_KeyFrameInterval_T tVidencKeyFrameInterval;
++
++	OMX_VendorConfig_Common_Name_T tVScalerDevName;
++	OMX_VendorConfig_Common_PhysicalMemInfo tVScalerPmap;
++	OMX_VendorConfig_Common_Resolution_T tVideoSrcRes;
++	OMX_VendorConfig_Common_ColorFormat_T tVideoSrcColor;
++	OMX_VendorConfig_Common_Region_T tVScalerSrcCrop;
++	OMX_VendorConfig_Common_Resolution_T tVScalerDstRes;
++	OMX_VendorConfig_Common_ColorFormat_T tVScalerDstColor;
++	pmap_t readerPhysicalMemInfo;
++	pmap_t scalerPhysicalMemInfo;
++	OMX_VendorConfig_Common_PhysicalMemInfo tVReaderPmap;
++
++	DBG("Configuring components");
++
++	if (ctx == NULL)
++	{
++		eError = OMX_ErrorBadParameter;
++	}
++	else
++	{
++		// Configure video buffer reader component
++		tVideoSrcRes.size.width = BUFFER_IMG_WIDTH;
++		tVideoSrcRes.size.height = BUFFER_IMG_HEIGHT;
++		tVideoSrcRes.w_stride = tVideoSrcRes.size.width;
++		(void)set_config(ctx->handle_reader, OMX_IndexVendorConfig_VideoBufReader_SetSourceResolution, (OMX_PTR)&tVideoSrcRes);
++
++		tVideoSrcColor.eColorFormat = BUFFER_IMG_FORMAT;
++		(void)set_config(ctx->handle_reader, OMX_IndexVendorConfig_VideoBufReader_SetSourceColorFormat, (OMX_PTR)&tVideoSrcColor);
++
++		pmap_get_info(VREADER_PMAPNAME, &readerPhysicalMemInfo);
++		tVReaderPmap.base = readerPhysicalMemInfo.base;
++		tVReaderPmap.offset = 0;
++		tVReaderPmap.framesize = BUFFER_IMG_FRAME_SIZE;
++		tVReaderPmap.nb_frame = 4;
++
++		eError = set_config(ctx->handle_reader, OMX_IndexVendorConfig_VideoBufReader_RequestAllocateBuffer, (OMX_PTR)&tVReaderPmap);
++
++		if (eError != OMX_ErrorNone)
++		{
++			DBG("Failed to allocate buffer");
++			return eError;
++		}
++
++		// Configure video scaler component
++		strcpy(tVScalerDevName.name, VSCALER_DEVNMAE);
++		(void)set_config(ctx->handle_vidscaler, OMX_IndexVendorConfig_VideoScaler_SetDevice, (OMX_PTR)&tVScalerDevName);
++
++		tVideoSrcRes.size.width = BUFFER_IMG_WIDTH;
++		tVideoSrcRes.size.height = BUFFER_IMG_HEIGHT;
++		tVideoSrcRes.w_stride = tVideoSrcRes.size.width;
++		(void)set_config(ctx->handle_vidscaler, OMX_IndexVendorConfig_VideoScaler_SetSourceResolution, (OMX_PTR)&tVideoSrcRes);
++
++		tVideoSrcColor.eColorFormat = BUFFER_IMG_FORMAT;
++		(void)set_config(ctx->handle_vidscaler, OMX_IndexVendorConfig_VideoScaler_SetSourceColorFormat, (OMX_PTR)&tVideoSrcColor);
++
++		tVScalerSrcCrop.origin.x = 0;
++		tVScalerSrcCrop.origin.y = 0;
++		tVScalerSrcCrop.size.width = tVideoSrcRes.size.width;
++		tVScalerSrcCrop.size.height = tVideoSrcRes.size.height;
++		(void)set_config(ctx->handle_vidscaler, OMX_IndexVendorConfig_VideoScaler_SetScaleRegion, (OMX_PTR)&tVScalerSrcCrop);
++
++		tVScalerDstRes.size.width = VID_WIDTH;
++		tVScalerDstRes.size.height = VID_HEIGHT;
++		tVScalerDstRes.w_stride = tVScalerDstRes.size.width;
++		(void)set_config(ctx->handle_vidscaler, OMX_IndexVendorConfig_VideoScaler_SetTargetResolution, (OMX_PTR)&tVScalerDstRes);
++
++		tVScalerDstColor.eColorFormat = VID_FORMAT;
++		(void)set_config(ctx->handle_vidscaler, OMX_IndexVendorConfig_VideoScaler_SetTargetColorFormat, (OMX_PTR)&tVScalerDstColor);
++
++		pmap_get_info(VSCALER_PMAPNAME, &scalerPhysicalMemInfo);
++		tVScalerPmap.base = scalerPhysicalMemInfo.base;
++		tVScalerPmap.offset = 0;
++		tVScalerPmap.framesize = tVScalerDstRes.size.width * tVScalerDstRes.size.height * 3 / 2;
++		tVScalerPmap.nb_frame = 4;
++
++		(void)set_config(ctx->handle_vidscaler, OMX_IndexVendorConfig_VideoScaler_SetPmapInfo, (OMX_PTR)&tVScalerPmap);
++
++		// Configure video encoder component
++		tVidencRes.iWidth 	= tVScalerDstRes.size.width;
++		tVidencRes.iHeight 	= tVScalerDstRes.size.height;
++		(void)set_config(ctx->handle_videnc, OMX_IndexVendorConfig_VideoEnc_SetResolution, (OMX_PTR)&tVidencRes);
++
++		tVidencFPS.iNum 	= VID_FPS;
++		tVidencFPS.iDen 	= 1;
++		(void)set_config(ctx->handle_videnc, OMX_IndexVendorConfig_VideoEnc_SetFrameRate, (OMX_PTR)&tVidencFPS);
++
++		tVidencColorFormat.eColorFormat = tVScalerDstColor.eColorFormat;
++		(void)set_config(ctx->handle_videnc, OMX_IndexVendorConfig_VideoEnc_SetColorFormat, (OMX_PTR)&tVidencColorFormat);
++
++		tVidencBitrate.iBitrate = VID_BITRATE;
++		(void)set_config(ctx->handle_videnc, OMX_IndexVendorConfig_VideoEnc_SetBitrate, (OMX_PTR)&tVidencBitrate);
++
++		tVidencKeyFrameInterval.iKeyFrameInterval = VID_GOP;
++		(void)set_config(ctx->handle_videnc, OMX_IndexVendorConfig_VideoEnc_SetKeyFrameInterval, (OMX_PTR)&tVidencKeyFrameInterval);
++	}
++
++	DBG("Success. components are configured");
++
++	return eError;
++}
++
++static void Push_rgb_frames(IL_handle handle, char* source_file_name)
++{
++	OMX_ERRORTYPE eError = OMX_ErrorNone;
++	buffervencData_T *ctx = (buffervencData_T *)handle;
++	FILE *fp = fopen(source_file_name, "rb");
++
++	if (!fp)
++	{
++		perror("Failed to open RGB file");
++		return;
++	}
++	eError = set_config(ctx->handle_reader, OMX_IndexVendorConfig_VideoBufReader_SetStart, NULL);
++
++	if (eError != OMX_ErrorNone)
++	{
++		perror("Failed to start buffer reader.");
++		return;
++	}
++
++	while (1)
++	{
++		OMX_Vendor_Common_PrivateData_VideoData_T* videodata = NULL;
++		eError = get_config(ctx->handle_reader, OMX_IndexVendorConfig_VideoBufReader_GetEmptyBuffer, &videodata);
++		if (eError == OMX_ErrorNotReady)
++		{
++			usleep(5000);
++			continue;
++		}
++
++		size_t read_size = fread(videodata->viraddr[0], 1, BUFFER_IMG_FRAME_SIZE, fp);
++		bool is_eos = (read_size < BUFFER_IMG_FRAME_SIZE);
++
++		if ((g_loop == true) && (is_eos == true))
++		{
++			fseek(fp, 0, SEEK_SET);
++			read_size = fread(videodata->viraddr[0], 1, BUFFER_IMG_FRAME_SIZE, fp);
++			is_eos = false;
++		}
++
++		videodata->bytesused = (is_eos == true) ? 0 : read_size;
++		eError = set_config(ctx->handle_reader, OMX_IndexVendorConfig_VideoBufReader_PushData, videodata);
++		if (eError != OMX_ErrorNone)
++		{
++			fprintf(stderr, "OMX_SetConfig(PushData) failed: 0x%08x\n", eError);
++			break;
++		}
++
++		if (is_eos == true)
++		{
++			break;
++		}
++	}
++	while (g_end_of_stream == false)
++	{
++		// Wait until all straem is processed
++		usleep(1000);
++	}
++}
++
++static void* save_file_thread(void* priv)
++{
++	VideoReader_T* pReader = (VideoReader_T*)priv;
++
++	DBG("Start saving file thread");
++
++	while (pReader->isRunning == true)
++	{
++		OMX_BUFFERHEADERTYPE *buf = NULL;
++
++		g_mutex_lock(&pReader->queue_mutex);
++
++		while ((g_queue_is_empty(pReader->save_queue) && (pReader->isRunning == true)))
++		{
++			g_cond_wait(&pReader->queue_cond, &pReader->queue_mutex);
++		}
++
++		if (!g_queue_is_empty(pReader->save_queue))
++		{
++			buf = g_queue_pop_head(pReader->save_queue);
++		}
++
++		g_mutex_unlock(&pReader->queue_mutex);
++
++		if (buf != NULL)
++		{
++			fwrite(buf->pBuffer, 1, buf->nFilledLen, pReader->dump_fp);
++			fflush(pReader->dump_fp);
++			g_free(buf->pBuffer);
++			g_free(buf);
++		}
++	}
++}
+-- 
+2.25.1
+

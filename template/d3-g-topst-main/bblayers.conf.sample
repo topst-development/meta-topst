@@ -13,6 +13,7 @@ BBLAYERS ?= " \
   ##OEROOT##/meta-openembedded/meta-oe \
   ##OEROOT##/meta-openembedded/meta-python \
   ##OEROOT##/meta-openembedded/meta-multimedia \
+  ##OEROOT##/meta-openembedded/meta-webserver \
   \
   ##OEROOT##/meta-webkit \
   ##OEROOT##/meta-topst-bsp \

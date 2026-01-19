@@ -1,0 +1,32 @@
+From 29de6dfef8d7f3526171583a0ff63a46821fc5af Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=EB=B0=95=EC=B0=AC=28Chan=20Park=29?=
+ <chan.park@telechips.com>
+Date: Tue, 3 Dec 2024 17:20:46 +0900
+Subject: [PATCH] [ref] disable overlaymix
+
+TCS :
+---
+ drivers/CMakeLists.txt | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/drivers/CMakeLists.txt b/drivers/CMakeLists.txt
+index 490258b..4653c83 100644
+--- a/drivers/CMakeLists.txt
++++ b/drivers/CMakeLists.txt
+@@ -20,7 +20,6 @@ else()
+ endif()
+ 
+ add_subdirectory(common)
+-add_subdirectory(overlaymix)
+ add_subdirectory(pmap)
+ add_subdirectory(scaler)
+ add_subdirectory(camera)
+@@ -29,5 +28,4 @@ add_subdirectory(vout)
+ add_subdirectory(drm)
+ 
+ target_include_directories(scaler PUBLIC common/include)
+-target_include_directories(overlaymix PUBLIC common/include)
+ #add_subdirectory(test_apps)
+-- 
+2.25.1
+

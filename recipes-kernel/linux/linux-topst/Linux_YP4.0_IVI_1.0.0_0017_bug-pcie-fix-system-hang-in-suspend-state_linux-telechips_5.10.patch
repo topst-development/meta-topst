@@ -1,0 +1,1597 @@
+From 9d4b92e7fc528476301dbd9642ac002dbfa96a3c Mon Sep 17 00:00:00 2001
+From: Inbae Jeon <inbest@telechips.com>
+Date: Thu, 18 Jul 2024 12:12:40 +0900
+Subject: [PATCH] [bug] pcie: fix system hang in suspend state
+
+Symptoms:
+	The pcie phy driver causes system hang in suspend state.
+
+Cause:
+	1. The pcie phy module attempts to access hw registers
+	while powered off.
+
+Resolution :
+	1. Update the suspend function to prevent wrong access
+	in suspend state.
+	2. Add resume function to the pcie phy drivers to resupply
+	 clock in resume state.
+
+TCS: TMBSPG-1309, TMBSP-4487
+---
+ .../dts/telechips/tcc750x/tcc750x-clk.dtsi    |  35 +-
+ .../dts/telechips/tcc750x/tcc750x-pcie.dtsi   |   2 +-
+ .../dts/telechips/tcc805x/tcc805x-clk.dtsi    |  37 +-
+ .../dts/telechips/tcc805x/tcc805x-pcie.dtsi   |   2 +-
+ .../dts/telechips/tcc807x/tcc807x-clk.dtsi    |  43 +-
+ .../dts/telechips/tcc807x/tcc807x-pcie.dtsi   |   4 +-
+ drivers/pci/controller/dwc/telechips/Kconfig  |   3 +-
+ .../pci/controller/dwc/telechips/pcie-axon.h  |  19 +-
+ .../controller/dwc/telechips/pcie-dolphin.h   |  19 +-
+ .../pci/controller/dwc/telechips/pcie-tcc.c   | 401 ++++++++++++++----
+ drivers/phy/telechips/phy-sec08lpp-pcie.c     |  40 +-
+ drivers/phy/telechips/phy-sec14lpp-pcie.c     |  38 +-
+ drivers/phy/telechips/phy-ss14lpp-x1ns-pcie.c |  50 ++-
+ drivers/phy/telechips/phy-ss14lpp-x2ns-pcie.c |  51 ++-
+ include/soc/telechips/dw_edma.h               |  30 ++
+ 15 files changed, 604 insertions(+), 170 deletions(-)
+ create mode 100644 include/soc/telechips/dw_edma.h
+
+diff --git a/arch/arm64/boot/dts/telechips/tcc750x/tcc750x-clk.dtsi b/arch/arm64/boot/dts/telechips/tcc750x/tcc750x-clk.dtsi
+index 8391130378c7..f8e35d7fbab1 100644
+--- a/arch/arm64/boot/dts/telechips/tcc750x/tcc750x-clk.dtsi
++++ b/arch/arm64/boot/dts/telechips/tcc750x/tcc750x-clk.dtsi
+@@ -66,8 +66,7 @@ fbus_smu: fbus_smu {
+ 			<FBUS_GPSB>, <FBUS_UART>, <FBUS_CAN>, <FBUS_SDMMC>,
+ 			<FBUS_SFMC>, <FBUS_DMA>, <FBUS_CBC>, <FBUS_HSM>,
+ 			<FBUS_IMEM>, <FBUS_OIC_CR>, <FBUS_GMAC>, <FBUS_DDI>,
+-			<FBUS_CAM>, <FBUS_PCIe>, <FBUS_OMC_ACLK>, <FBUS_OIC>,
+-			<FBUS_CPUBUS>;
++			<FBUS_CAM>, <FBUS_OMC_ACLK>, <FBUS_OIC>, <FBUS_CPUBUS>;
+ 		clock-output-names =
+ 			"fbus_oic_npu1", "fbus_oic_npu0", "fbus_oic_safe_dap",
+ 			"fbus_oic_pcdv", "fbus_lidar_ctrl", "fbus_lidar_proc",
+@@ -76,8 +75,7 @@ fbus_smu: fbus_smu {
+ 			"fbus_gpsb", "fbus_uart", "fbus_can", "fbus_sdmmc",
+ 			"fbus_sfmc", "fbus_dma", "fbus_cbc", "fbus_hsm",
+ 			"fbus_imem", "fbus_oic_cr", "fbus_gmac", "fbus_ddi",
+-			"fbus_cam", "fbus_pcie", "fbus_omc_aclk", "fbus_oic",
+-			"fbus_cpubus";
++			"fbus_cam", "fbus_omc_aclk", "fbus_oic", "fbus_cpubus";
+ 		ccf-flags =	<(CLK_IGNORE_UNUSED|CLK_IS_CRITICAL)>,	/* FBUS_OIC_NPU1 */
+ 				<(CLK_IGNORE_UNUSED|CLK_IS_CRITICAL)>,	/* FBUS_OIC_NPU_0 */
+ 				<(CLK_IGNORE_UNUSED|CLK_IS_CRITICAL)>,	/* FBUS_OIC_SAFE_DAP */
+@@ -105,7 +103,6 @@ fbus_smu: fbus_smu {
+ 				<(CLK_IGNORE_UNUSED|CLK_IS_CRITICAL)>,	/* FBUS_GMAC */
+ 				<(CLK_IGNORE_UNUSED|CLK_IS_CRITICAL)>,	/* FBUS_DDIB */
+ 				<(CLK_IGNORE_UNUSED|CLK_IS_CRITICAL)>,	/* FBUS_CAMB */
+-				<(CLK_IGNORE_UNUSED|CLK_IS_CRITICAL)>,	/* FBUS_PCIe */
+ 				<(CLK_IGNORE_UNUSED|CLK_IS_CRITICAL)>,	/* FBUS_OMC_ACLK */
+ 				<(CLK_IGNORE_UNUSED|CLK_IS_CRITICAL)>,	/* FBUS_OIC */
+ 				<(CLK_IGNORE_UNUSED|CLK_IS_CRITICAL)>;	/* FBUS_CPUB */
+@@ -137,12 +134,38 @@ fbus_smu: fbus_smu {
+ 				<(0)>,	/* FBUS_GMAC */
+ 				<(0)>,	/* FBUS_DDIB */
+ 				<(0)>,	/* FBUS_CAMB */
+-				<(0)>,	/* FBUS_PCIe */
+ 				<(0)>,	/* FBUS_OMC_ACLK */
+ 				<(0)>,	/* FBUS_OIC */
+ 				<(0)>;	/* FBUS_CPUB */
+ 	};
+ 
++	fbus_pcie: fbus_pcie {
++		compatible = "telechips,clk-fbus";
++		#clock-cells = <1>;
++		clocks =
++			<&smu_npll_3200	PLL_0	SYS_CLKCTRL_SEL_PLL0>,
++			<&smu_npll_3200	PLL_1	SYS_CLKCTRL_SEL_PLL1>,
++			<&smu_npll_3200	PLL_2	SYS_CLKCTRL_SEL_PLL2>,
++			<&smu_npll_3200	PLL_3	SYS_CLKCTRL_SEL_PLL3>,
++			<&smu_npll_3200	PLL_4	SYS_CLKCTRL_SEL_PLL4>,
++			<&osc24m	OSC_XIN	SYS_CLKCTRL_SEL_XIN>,
++			<&osc24m	0	SYS_CLKCTRL_SEL_XIN>,
++			<&smu_npll_3200	PLL_0	SYS_CLKCTRL_SEL_PLL0DIV>,
++			<&smu_npll_3200	PLL_1	SYS_CLKCTRL_SEL_PLL1DIV>,
++			<&smu_npll_3200	PLL_2	SYS_CLKCTRL_SEL_PLL2DIV>,
++			<&smu_npll_3200	PLL_3	SYS_CLKCTRL_SEL_PLL3DIV>,
++			<&smu_npll_3200	PLL_4	SYS_CLKCTRL_SEL_PLL4DIV>,
++			<&osc24m	OSC_XIN	SYS_CLKCTRL_SEL_XINDIV>,
++			<&osc24m	0	SYS_CLKCTRL_SEL_XIN>,
++			<&osc24m	0	SYS_CLKCTRL_SEL_XIN>,
++			<&osc24m	0	SYS_CLKCTRL_SEL_XIN>;
++
++		clock-indices = <FBUS_PCIe>;
++		clock-output-names = "fbus_pcie";
++		ccf-flags =	<(CLK_IGNORE_UNUSED|CLK_IS_CRITICAL)>;	/* FBUS_PCIe */
++		tc-flags =	<(0)>;	/* FBUS_PCIe */
++	};
++
+ 	clk_peri: smu_peri {
+ 		compatible = "telechips,clk-peri";
+ 		#clock-cells = <1>;
+diff --git a/arch/arm64/boot/dts/telechips/tcc750x/tcc750x-pcie.dtsi b/arch/arm64/boot/dts/telechips/tcc750x/tcc750x-pcie.dtsi
+index 765e37e8b474..866a668fa1c3 100644
+--- a/arch/arm64/boot/dts/telechips/tcc750x/tcc750x-pcie.dtsi
++++ b/arch/arm64/boot/dts/telechips/tcc750x/tcc750x-pcie.dtsi
+@@ -13,7 +13,7 @@ pcie_phy: pcie_phy@12400000 {
+ 			0 0x12410000 0 0x10000>;
+ 		reg-names = "phy", "clk";
+ 		#phy-cells = <0>;
+-		clocks = <&clk_peri PERI_PCIe>, <&fbus_smu FBUS_PCIe>;
++		clocks = <&clk_peri PERI_PCIe>, <&fbus_pcie FBUS_PCIe>;
+ 		clock-names = "pcie_phy", "pcie_fbus";
+ 		pms = <0x0504C80C>;
+ 		status = "disabled";
+diff --git a/arch/arm64/boot/dts/telechips/tcc805x/tcc805x-clk.dtsi b/arch/arm64/boot/dts/telechips/tcc805x/tcc805x-clk.dtsi
+index 174a1adff105..e04b09aa3cae 100644
+--- a/arch/arm64/boot/dts/telechips/tcc805x/tcc805x-clk.dtsi
++++ b/arch/arm64/boot/dts/telechips/tcc805x/tcc805x-clk.dtsi
+@@ -90,10 +90,10 @@ fbus_smu: fbus_smu {
+ 
+ 		clock-indices =
+ 			<FBUS_CBUS>, <FBUS_CMBUS>, <FBUS_HSIO>, <FBUS_SMU>,
+-			<FBUS_DDI>, <FBUS_IO>, <FBUS_HSM>, <FBUS_PCIe0>;
++			<FBUS_DDI>, <FBUS_IO>, <FBUS_HSM>;
+ 		clock-output-names =
+ 			"fbus_cbus", "fbus_cmbus", "fbus_hsio", "fbus_smu",
+-			"fbus_ddi", "fbus_io", "fbus_hsm", "fbus_pcie0";
++			"fbus_ddi", "fbus_io", "fbus_hsm";
+ 		ccf-flags =
+ 			<(CLK_SET_RATE_GATE | CLK_IGNORE_UNUSED)>,    /* FBUS_CBUS */
+ 			<(CLK_IGNORE_UNUSED)>,    /* FBUS_CMBUS */
+@@ -101,8 +101,7 @@ fbus_smu: fbus_smu {
+ 			<(CLK_SET_RATE_GATE | CLK_IGNORE_UNUSED)>,    /* FBUS_SMU */
+ 			<(CLK_SET_RATE_GATE | CLK_IGNORE_UNUSED)>,    /* FBUS_DDI */
+ 			<(CLK_SET_RATE_GATE | CLK_IS_CRITICAL)>,    /* FBUS_IO */
+-			<(CLK_SET_RATE_GATE | CLK_IGNORE_UNUSED)>,    /* FBUS_HSM */
+-			<(CLK_SET_RATE_GATE | CLK_IGNORE_UNUSED)>;    /* FBUS_PCIe0 */
++			<(CLK_SET_RATE_GATE | CLK_IGNORE_UNUSED)>;    /* FBUS_HSM */
+ 		tc-flags =
+ 			<(0)>,    /* FBUS_CBUS */
+ 			<(0)>,    /* FBUS_CMBUS */
+@@ -110,8 +109,34 @@ fbus_smu: fbus_smu {
+ 			<(0)>,    /* FBUS_SMU */
+ 			<(0)>,    /* FBUS_DDI */
+ 			<(0)>,    /* FBUS_IO */
+-			<(0)>,    /* FBUS_HSM */
+-			<(0)>;    /* FBUS_PCIe0 */
++			<(0)>;    /* FBUS_HSM */
++	};
++
++	fbus_pcie: fbus_pcie {
++		compatible = "telechips,clk-fbus";
++		#clock-cells = <1>;
++		clocks =
++			<&smu_npll_3200	PLL_0	SMU_CLKCTRL_SEL_PLL0>,
++			<&smu_npll_3200	PLL_1	SMU_CLKCTRL_SEL_PLL1>,
++			<&smu_dpll_3200	PLL_2	SMU_CLKCTRL_SEL_PLL2>,
++			<&smu_dpll_3200	PLL_3	SMU_CLKCTRL_SEL_PLL3>,
++			<&smu_dpll_3200	PLL_4	SMU_CLKCTRL_SEL_PLL4>,
++			<&osc24m	OSC_XIN	SMU_CLKCTRL_SEL_XIN>,
++			<&osc24m	0	SMU_CLKCTRL_SEL_XIN>,
++			<&smu_npll_3200	PLL_0	SMU_CLKCTRL_SEL_PLL0DIV>,
++			<&smu_npll_3200	PLL_1	SMU_CLKCTRL_SEL_PLL1DIV>,
++			<&smu_dpll_3200	PLL_2	SMU_CLKCTRL_SEL_PLL2DIV>,
++			<&smu_dpll_3200	PLL_3	SMU_CLKCTRL_SEL_PLL3DIV>,
++			<&smu_dpll_3200	PLL_4	SMU_CLKCTRL_SEL_PLL4DIV>,
++			<&osc24m	OSC_XIN	SMU_CLKCTRL_SEL_XINDIV>,
++			<&osc24m	0	SMU_CLKCTRL_SEL_XIN>,
++			<&osc24m	0	SMU_CLKCTRL_SEL_XIN>,
++			<&osc24m	0	SMU_CLKCTRL_SEL_XIN>;
++
++		clock-indices = <FBUS_PCIe0>;
++		clock-output-names = "fbus_pcie0";
++		ccf-flags = <(CLK_SET_RATE_GATE | CLK_IGNORE_UNUSED)>;    /* FBUS_PCIe0 */
++		tc-flags = <(0)>;    /* FBUS_PCIe0 */
+ 	};
+ 
+ 	clk_peri: clk_peri {
+diff --git a/arch/arm64/boot/dts/telechips/tcc805x/tcc805x-pcie.dtsi b/arch/arm64/boot/dts/telechips/tcc805x/tcc805x-pcie.dtsi
+index 946d71340aec..b30290bb7ca3 100644
+--- a/arch/arm64/boot/dts/telechips/tcc805x/tcc805x-pcie.dtsi
++++ b/arch/arm64/boot/dts/telechips/tcc805x/tcc805x-pcie.dtsi
+@@ -13,7 +13,7 @@ pcie_phy: pcie_phy@11100000 {
+ 			0 0x11110000 0 0x10000>;
+ 		reg-names = "phy", "clk";
+ 		#phy-cells = <0>;
+-		clocks = <&clk_peri PERI_PCIE0_PHY_CR_CLK>, <&fbus_smu FBUS_PCIe0>;
++		clocks = <&clk_peri PERI_PCIE0_PHY_CR_CLK>, <&fbus_pcie FBUS_PCIe0>;
+ 		clock-names = "pcie_phy", "pcie_fbus";
+ 		pms = <0x0504C80C>;
+ 		status = "disabled";
+diff --git a/arch/arm64/boot/dts/telechips/tcc807x/tcc807x-clk.dtsi b/arch/arm64/boot/dts/telechips/tcc807x/tcc807x-clk.dtsi
+index e06705478cdb..ff3c7cce73e3 100644
+--- a/arch/arm64/boot/dts/telechips/tcc807x/tcc807x-clk.dtsi
++++ b/arch/arm64/boot/dts/telechips/tcc807x/tcc807x-clk.dtsi
+@@ -351,6 +351,7 @@ cpu_sp_dsu: cpu_sp_dsu {
+ 
+ 	fbus_smu: fbus_smu {
+ 		compatible = "telechips,clk-fbus";
++		type-fixed;
+ 		#clock-cells = <1>;
+ 		clocks =
+ 			<&smu_npll_3200 PLL_0   SMU_CLKCTRL_SEL_PLL0>,
+@@ -371,12 +372,10 @@ fbus_smu: fbus_smu {
+ 			<&osc24m        0       SMU_CLKCTRL_SEL_XIN>;
+ 		clock-indices =
+ 			<FBUS_CPU>, <FBUS_TAW>, <FBUS_HSIO>, <FBUS_SMU>,
+-			<FBUS_DDI>, <FBUS_IO>, <FBUS_HSM>, <FBUS_PCIe0>,
+-			<FBUS_PCIe1>;
++			<FBUS_DDI>, <FBUS_IO>, <FBUS_HSM>;
+ 		clock-output-names =
+ 			"fbus_cbus", "fbus_taw", "fbus_hsio", "fbus_smu",
+-			"fbus_ddi", "fbus_io", "fbus_hsm", "fbus_pcie0",
+-			"fbus_pcie1";
++			"fbus_ddi", "fbus_io", "fbus_hsm";
+ 		ccf-flags =
+ 			<(CLK_IGNORE_UNUSED)>,	/* FBUS_CBUS */
+ 			<(CLK_IS_CRITICAL)>,	/* FBUS_TAW */
+@@ -384,9 +383,7 @@ fbus_smu: fbus_smu {
+ 			<(CLK_IGNORE_UNUSED)>,	/* FBUS_SMU */
+ 			<(CLK_IGNORE_UNUSED)>,	/* FBUS_DDI */
+ 			<(CLK_IS_CRITICAL)>,	/* FBUS_IO */
+-			<(CLK_IGNORE_UNUSED)>,	/* FBUS_HSM */
+-			<(CLK_IGNORE_UNUSED)>,	/* FBUS_PCIe0 */
+-			<(CLK_IGNORE_UNUSED)>;	/* FBUS_PCIe1 */
++			<(CLK_IGNORE_UNUSED)>;	/* FBUS_HSM */
+ 		tc-flags =
+ 			<(0)>,	/* FBUS_CBUS */
+ 			<(0)>,	/* FBUS_TAW */
+@@ -394,7 +391,37 @@ fbus_smu: fbus_smu {
+ 			<(0)>,	/* FBUS_SMU */
+ 			<(0)>,	/* FBUS_DDI */
+ 			<(0)>,	/* FBUS_IO */
+-			<(0)>,	/* FBUS_HSM */
++			<(0)>;	/* FBUS_HSM */
++	};
++
++	fbus_pcie: fbus_pcie {
++		compatible = "telechips,clk-fbus";
++		#clock-cells = <1>;
++		clocks =
++			<&smu_npll_3200 PLL_0   SMU_CLKCTRL_SEL_PLL0>,
++			<&smu_npll_3200 PLL_1   SMU_CLKCTRL_SEL_PLL1>,
++			<&smu_dpll_3200 PLL_2   SMU_CLKCTRL_SEL_PLL2>,
++			<&smu_dpll_3200 PLL_3   SMU_CLKCTRL_SEL_PLL3>,
++			<&smu_dpll_3200 PLL_4   SMU_CLKCTRL_SEL_PLL4>,
++			<&osc24m        OSC_XIN SMU_CLKCTRL_SEL_XIN>,
++			<&osc24m        0       SMU_CLKCTRL_SEL_XIN>,
++			<&smu_npll_3200 PLL_0   SMU_CLKCTRL_SEL_PLL0DIV>,
++			<&smu_npll_3200 PLL_1   SMU_CLKCTRL_SEL_PLL1DIV>,
++			<&smu_dpll_3200 PLL_2   SMU_CLKCTRL_SEL_PLL2DIV>,
++			<&smu_dpll_3200 PLL_3   SMU_CLKCTRL_SEL_PLL3DIV>,
++			<&smu_dpll_3200 PLL_4   SMU_CLKCTRL_SEL_PLL4DIV>,
++			<&osc24m        OSC_XIN SMU_CLKCTRL_SEL_XIN>,
++			<&osc24m        0       SMU_CLKCTRL_SEL_XIN>,
++			<&osc24m        0       SMU_CLKCTRL_SEL_XIN>,
++			<&osc24m        0       SMU_CLKCTRL_SEL_XIN>;
++		clock-indices =
++			<FBUS_PCIe0>, <FBUS_PCIe1>;
++		clock-output-names =
++			"fbus_pcie0", "fbus_pcie1";
++		ccf-flags =
++			<(CLK_IGNORE_UNUSED)>,	/* FBUS_PCIe0 */
++			<(CLK_IGNORE_UNUSED)>;	/* FBUS_PCIe1 */
++		tc-flags =
+ 			<(0)>,	/* FBUS_PCIe0 */
+ 			<(0)>;	/* FBUS_PCIe1 */
+ 	};
+diff --git a/arch/arm64/boot/dts/telechips/tcc807x/tcc807x-pcie.dtsi b/arch/arm64/boot/dts/telechips/tcc807x/tcc807x-pcie.dtsi
+index 100f2b7952d5..679ed38e1b13 100644
+--- a/arch/arm64/boot/dts/telechips/tcc807x/tcc807x-pcie.dtsi
++++ b/arch/arm64/boot/dts/telechips/tcc807x/tcc807x-pcie.dtsi
+@@ -15,7 +15,7 @@ pcie0_phy: pcie_phy@11100000 {
+ 			0 0x11140000 0 0x10000>;
+ 		reg-names = "phy", "clk", "pcs", "pma";
+ 		#phy-cells = <0>;
+-		clocks = <&clk_peri PERI_PCIE0_PHY_CR_CLK>, <&fbus_smu FBUS_PCIe0>;
++		clocks = <&clk_peri PERI_PCIE0_PHY_CR_CLK>, <&fbus_pcie FBUS_PCIe0>;
+ 		clock-names = "pcie_phy", "pcie_fbus";
+ 		status = "disabled";
+ 	};
+@@ -28,7 +28,7 @@ pcie1_phy: pcie_phy@11500000 {
+ 			0 0x11540000 0 0x10000>;
+ 		reg-names = "phy", "clk", "pcs", "pma";
+ 		#phy-cells = <0>;
+-		clocks = <&clk_peri PERI_PCIE1_PHY_CR_CLK>, <&fbus_smu FBUS_PCIe1>;
++		clocks = <&clk_peri PERI_PCIE1_PHY_CR_CLK>, <&fbus_pcie FBUS_PCIe1>;
+ 		clock-names = "pcie_phy", "pcie_fbus";
+ 		status = "disabled";
+ 	};
+diff --git a/drivers/pci/controller/dwc/telechips/Kconfig b/drivers/pci/controller/dwc/telechips/Kconfig
+index e53969c7d073..a03b7db7570b 100644
+--- a/drivers/pci/controller/dwc/telechips/Kconfig
++++ b/drivers/pci/controller/dwc/telechips/Kconfig
+@@ -31,7 +31,8 @@ config PCIE_TELECHIPS_HOST
+ 
+ config PCIE_TELECHIPS_EP
+ 	bool "Telechips PCIe controller Endpoint mode"
+-	depends on PCIE_TELECHIPS && PCI_ENDPOINT && !ARCH_TCC803X
++	depends on PCIE_TELECHIPS && !ARCH_TCC803X
++	depends on PCI_ENDPOINT
+ 	depends on PCI_MSI_IRQ_DOMAIN
+ 	select PCIE_DW_EP
+ 	help
+diff --git a/drivers/pci/controller/dwc/telechips/pcie-axon.h b/drivers/pci/controller/dwc/telechips/pcie-axon.h
+index 259bca22c006..e465d8ed11b3 100644
+--- a/drivers/pci/controller/dwc/telechips/pcie-axon.h
++++ b/drivers/pci/controller/dwc/telechips/pcie-axon.h
+@@ -23,11 +23,12 @@
+ #define PCIE_LINK_CFG31			(0x07CU)
+ #define PCIE_LINK_CFG33			(0x084U)
+ #define PCIE_LINK_CFG43			(0x0ACU)
+-#define PCIE_LINK_CFG53			(0x0D4U)
+ #define PCIE_LINK_CFG56			(0x0E0U)
+ #define PCIE_LINK_CFG88			(0x160U)
+ #define PCIE_LINK_CFG89			(0x164U)
+ #define PCIE_LINK_CFG91			(0x16CU)
++#define PCIE_LINK_CFG92			(0x170U)
++#define PCIE_LINK_CFG93			(0x174U)
+ 
+ #define PCIE_VDM_CTRL		(PCIE_LINK_CFG00)
+ #define PCIE_VDM_CODE		(PCIE_LINK_CFG01)
+@@ -43,11 +44,12 @@
+ #define PCIE_RADM_MSG_DATA		(PCIE_LINK_CFG31)
+ #define PCIE_SMLH_LINK_STS		(PCIE_LINK_CFG33)
+ #define PCIE_PHY_RST_CTRL		(PCIE_LINK_CFG43)
+-#define PCIE_SLV_INDIRECT_ADDR_MASK		(PCIE_LINK_CFG53)
+ #define PCIE_SYS_INT		(PCIE_LINK_CFG56)
+ #define PCIE_DBI_INDIRECT_ADDR_MASK		(PCIE_LINK_CFG88)
+ #define PCIE_APP_CTRL		(PCIE_LINK_CFG89)
+ #define PCIE_LINK_INTR		(PCIE_LINK_CFG91)
++#define PCIE_EDMA_INTR_STS		(PCIE_LINK_CFG92)
++#define PCIE_EDMA_INTR_EN		(PCIE_LINK_CFG93)
+ 
+ /*
+  * Mask/shift bits in PCIe related registers
+@@ -89,7 +91,6 @@
+ #define PCIE_LINK_CFG_DEVICE_TYPE_SHIFT		(6U)
+ #define PCIE_LINK_CFG_DEVICE_TYPE_MASK		((u32)0xFU << PCIE_LINK_CFG_DEVICE_TYPE_SHIFT)
+ 
+-#define PCIE_LINK_CFG_SLV_ADDR_MASK		(0xFFFFFFFFU)
+ #define PCIE_LINK_CFG_INDIRECT_ADDR_MASK		(0x200000U)
+ 
+ #define PCIE_LINK_CFG_MSI_INT_MASK		(0x60040021U)
+@@ -106,4 +107,16 @@
+ 
+ #define PCIE_LINK_CFG_POWER_UP_RST_SHIFT		(6U)
+ #define PCIE_LINK_CFG_POWER_UP_RST_MASK		((u32)0x1U << PCIE_LINK_CFG_POWER_UP_RST_SHIFT)
++
++#define PCIE_LINK_CFG_EDMA_RD_INTR_STS_SHIFT		(4U)
++#define PCIE_LINK_CFG_EDMA_WR_INTR_STS_SHIFT		(0U)
++#define PCIE_LINK_CFG_EDMA_RD_INTR_STS_MASK		((u32)0xFU << PCIE_LINK_CFG_EDMA_RD_INTR_STS_SHIFT)
++#define PCIE_LINK_CFG_EDMA_WR_INTR_STS_MASK		((u32)0xFU << PCIE_LINK_CFG_EDMA_WR_INTR_STS_SHIFT)
++#define PCIE_LINK_CFG_EDMA_INTR_STS_MASK		(PCIE_LINK_CFG_EDMA_RD_INTR_STS_MASK | PCIE_LINK_CFG_EDMA_WR_INTR_STS_MASK)
++
++#define PCIE_LINK_CFG_EDMA_RD_INTR_EN_SHIFT		(4U)
++#define PCIE_LINK_CFG_EDMA_WR_INTR_EN_SHIFT		(0U)
++#define PCIE_LINK_CFG_EDMA_RD_INTR_EN_MASK		((u32)0xFU << PCIE_LINK_CFG_EDMA_RD_INTR_EN_SHIFT)
++#define PCIE_LINK_CFG_EDMA_WR_INTR_EN_MASK		((u32)0xFU << PCIE_LINK_CFG_EDMA_WR_INTR_EN_SHIFT)
++#define PCIE_LINK_CFG_EDMA_INTR_EN_MASK		(PCIE_LINK_CFG_EDMA_RD_INTR_EN_MASK | PCIE_LINK_CFG_EDMA_WR_INTR_EN_MASK)
+ #endif		/* PCIE_AXON_H */
+diff --git a/drivers/pci/controller/dwc/telechips/pcie-dolphin.h b/drivers/pci/controller/dwc/telechips/pcie-dolphin.h
+index ce1544df6956..70aac3524fba 100644
+--- a/drivers/pci/controller/dwc/telechips/pcie-dolphin.h
++++ b/drivers/pci/controller/dwc/telechips/pcie-dolphin.h
+@@ -23,11 +23,12 @@
+ #define PCIE_LINK_CFG31			(0x07CU)
+ #define PCIE_LINK_CFG33			(0x084U)
+ #define PCIE_LINK_CFG44			(0x0B0U)
+-#define PCIE_LINK_CFG53			(0x0D4U)
+ #define PCIE_LINK_CFG57			(0x0E4U)
+ #define PCIE_LINK_CFG88			(0x160U)
+ #define PCIE_LINK_CFG89			(0x164U)
+ #define PCIE_LINK_CFG91			(0x16CU)
++#define PCIE_LINK_CFG92			(0x170U)
++#define PCIE_LINK_CFG93			(0x174U)
+ 
+ #define PCIE_VDM_CTRL		(PCIE_LINK_CFG00)
+ #define PCIE_VDM_CODE		(PCIE_LINK_CFG01)
+@@ -43,10 +44,11 @@
+ #define PCIE_RADM_MSG_DATA		(PCIE_LINK_CFG31)
+ #define PCIE_SMLH_LINK_STS		(PCIE_LINK_CFG33)
+ #define PCIE_PHY_RST_CTRL		(PCIE_LINK_CFG44)
+-#define PCIE_SLV_INDIRECT_ADDR_MASK		(PCIE_LINK_CFG53)
+ #define PCIE_SYS_INT		(PCIE_LINK_CFG57)
+ #define PCIE_DBI_INDIRECT_ADDR_MASK		(PCIE_LINK_CFG88)
+ #define PCIE_APP_CTRL		(PCIE_LINK_CFG89)
++#define PCIE_EDMA_INTR_STS		(PCIE_LINK_CFG92)
++#define PCIE_EDMA_INTR_EN		(PCIE_LINK_CFG93)
+ 
+ #if defined(CONFIG_ARCH_TCC803X)
+ #define PCIE_LINK_INTR		(PCIE_LINK_CFG04)
+@@ -94,7 +96,6 @@
+ #define PCIE_LINK_CFG_DEVICE_TYPE_SHIFT		(6U)
+ #define PCIE_LINK_CFG_DEVICE_TYPE_MASK		((u32)0xFU << PCIE_LINK_CFG_DEVICE_TYPE_SHIFT)
+ 
+-#define PCIE_LINK_CFG_SLV_ADDR_MASK		(0xFFFFFFFFU)
+ #define PCIE_LINK_CFG_INDIRECT_ADDR_MASK		(0x200000U)
+ 
+ #if defined(CONFIG_ARCH_TCC803X)
+@@ -117,4 +118,16 @@
+ 
+ #define PCIE_LINK_CFG_POWER_UP_RST_SHIFT		(6U)
+ #define PCIE_LINK_CFG_POWER_UP_RST_MASK		((u32)0x1U << PCIE_LINK_CFG_POWER_UP_RST_SHIFT)
++
++#define PCIE_LINK_CFG_EDMA_RD_INTR_STS_SHIFT		(4U)
++#define PCIE_LINK_CFG_EDMA_WR_INTR_STS_SHIFT		(0U)
++#define PCIE_LINK_CFG_EDMA_RD_INTR_STS_MASK		((u32)0xFU << PCIE_LINK_CFG_EDMA_RD_INTR_STS_SHIFT)
++#define PCIE_LINK_CFG_EDMA_WR_INTR_STS_MASK		((u32)0xFU << PCIE_LINK_CFG_EDMA_WR_INTR_STS_SHIFT)
++#define PCIE_LINK_CFG_EDMA_INTR_STS_MASK		(PCIE_LINK_CFG_EDMA_RD_INTR_STS_MASK | PCIE_LINK_CFG_EDMA_WR_INTR_STS_MASK)
++
++#define PCIE_LINK_CFG_EDMA_RD_INTR_EN_SHIFT		(4U)
++#define PCIE_LINK_CFG_EDMA_WR_INTR_EN_SHIFT		(0U)
++#define PCIE_LINK_CFG_EDMA_RD_INTR_EN_MASK		((u32)0xFU << PCIE_LINK_CFG_EDMA_RD_INTR_EN_SHIFT)
++#define PCIE_LINK_CFG_EDMA_WR_INTR_EN_MASK		((u32)0xFU << PCIE_LINK_CFG_EDMA_WR_INTR_EN_SHIFT)
++#define PCIE_LINK_CFG_EDMA_INTR_EN_MASK		(PCIE_LINK_CFG_EDMA_RD_INTR_EN_MASK | PCIE_LINK_CFG_EDMA_WR_INTR_EN_MASK)
+ #endif		/* PCIE_DOLPHIN_H */
+diff --git a/drivers/pci/controller/dwc/telechips/pcie-tcc.c b/drivers/pci/controller/dwc/telechips/pcie-tcc.c
+index a2fc45a1a2db..a1d25a1061bd 100644
+--- a/drivers/pci/controller/dwc/telechips/pcie-tcc.c
++++ b/drivers/pci/controller/dwc/telechips/pcie-tcc.c
+@@ -20,6 +20,7 @@
+ #include <linux/debugfs.h>
+ #include <linux/irqdomain.h>
+ #include <linux/pinctrl/consumer.h>
++#include <soc/telechips/dw_edma.h>
+ 
+ #include "../pcie-designware.h"
+ 
+@@ -32,10 +33,16 @@
+ #define to_tcc_pcie(x)	dev_get_drvdata((x)->dev)
+ 
+ #define to_phy_submode(r, m) \
+-	(((r) << 4) | (m))
++	(((u32)(r) << 4) | (u32)(m))
+ #define phy_set_clk(phy, mode) \
+ 	phy_set_mode_ext(phy, PHY_MODE_PCIE, mode)
+ 
++#define to_atu_outb_reg(index, offset) \
++	(u32)(PCIE_GET_ATU_OUTB_UNR_REG_OFFSET((index)) + (u32)(offset))
++
++#define to_atu_inb_reg(index, offset) \
++	(u32)(PCIE_GET_ATU_INB_UNR_REG_OFFSET((index)) + (u32)(offset))
++
+ /*
+  * PCIe controller wrapper DBI configuration registers
+  */
+@@ -54,6 +61,45 @@
+ #define DBI_PCIE_PORT_LOGIC_AMBA_ORDERING_CTRL		(DBI_PCIE_PORT_LOGIC_OFFSET + 0x1D8U)
+ #define DBI_PCIE_PORT_LOGIC_GEN4_LANE_MARGINING2		(DBI_PCIE_PORT_LOGIC_OFFSET + 0x480U)
+ 
++#define DBI_PCIE_DMA_CAP_OFFSET		(0x380000U)
++#define DBI_PCIE_DMA_CTRL_DATA_ARB_PRIOR		(DBI_PCIE_DMA_CAP_OFFSET + 0x000U)
++#define DBI_PCIE_DMA_WRITE_ENGINE_EN		(DBI_PCIE_DMA_CAP_OFFSET + 0x00CU)
++#define DBI_PCIE_DMA_WRITE_DOORBELL		(DBI_PCIE_DMA_CAP_OFFSET + 0x010U)
++#define DBI_PCIE_DMA_WRITE_CHANNEL_ARB_WEIGHT_LOW		(DBI_PCIE_DMA_CAP_OFFSET + 0x018U)
++#define DBI_PCIE_DMA_WRITE_INT_STATUS                (DBI_PCIE_DMA_CAP_OFFSET + 0x04CU)
++#define DBI_PCIE_DMA_WRITE_INT_MASK		(DBI_PCIE_DMA_CAP_OFFSET + 0x054U)
++#define DBI_PCIE_DMA_WRITE_INT_CLEAR		(DBI_PCIE_DMA_CAP_OFFSET + 0x58U)
++#define DBI_PCIE_DMA_WRITE_DONE_IMWR_LOW		(DBI_PCIE_DMA_CAP_OFFSET + 0x060U)
++#define DBI_PCIE_DMA_WRITE_DONE_IMWR_HIGH		(DBI_PCIE_DMA_CAP_OFFSET + 0x064U)
++#define DBI_PCIE_DMA_WRITE_ABORT_IMWR_LOW		(DBI_PCIE_DMA_CAP_OFFSET + 0x068U)
++#define DBI_PCIE_DMA_WRITE_ABORT_IMWR_HIGH		(DBI_PCIE_DMA_CAP_OFFSET + 0x06CU)
++#define DBI_PCIE_DMA_WRITE_CH01_IMWR_DATA		(DBI_PCIE_DMA_CAP_OFFSET + 0x070U)
++#define DBI_PCIE_DMA_WRITE_LINKED_LIST_ERR_EN		(DBI_PCIE_DMA_CAP_OFFSET + 0x090U)
++#define DBI_PCIE_DMA_WR_CH_CONTROL1		(DBI_PCIE_DMA_CAP_OFFSET + 0x200U)
++#define DBI_PCIE_DMA_WR_TRANSFER_SIZE		(DBI_PCIE_DMA_CAP_OFFSET + 0x208U)
++#define DBI_PCIE_DMA_WR_SAR_LOW		(DBI_PCIE_DMA_CAP_OFFSET + 0x20CU)
++#define DBI_PCIE_DMA_WR_SAR_HIGH		(DBI_PCIE_DMA_CAP_OFFSET + 0x210U)
++#define DBI_PCIE_DMA_WR_DAR_LOW		(DBI_PCIE_DMA_CAP_OFFSET + 0x214U)
++#define DBI_PCIE_DMA_WR_DAR_HIGH		(DBI_PCIE_DMA_CAP_OFFSET + 0x218U)
++
++#define DBI_PCIE_DMA_READ_ENGINE_EN		(DBI_PCIE_DMA_CAP_OFFSET + 0x02CU)
++#define DBI_PCIE_DMA_READ_DOORBELL		(DBI_PCIE_DMA_CAP_OFFSET + 0x030U)
++#define DBI_PCIE_DMA_READ_CHANNEL_ARB_WEIGHT_LOW		(DBI_PCIE_DMA_CAP_OFFSET + 0x038U)
++#define DBI_PCIE_DMA_READ_INT_STATUS                  (DBI_PCIE_DMA_CAP_OFFSET + 0x0A0U)
++#define DBI_PCIE_DMA_READ_INT_MASK		(DBI_PCIE_DMA_CAP_OFFSET + 0x0A8U)
++#define DBI_PCIE_DMA_READ_INT_CLEAR		(DBI_PCIE_DMA_CAP_OFFSET + 0x0ACU)
++#define DBI_PCIE_DMA_READ_LINKED_LIST_ERR_EN		(DBI_PCIE_DMA_CAP_OFFSET + 0x0C4U)
++#define DBI_PCIE_DMA_READ_DONE_IMWR_LOW		(DBI_PCIE_DMA_CAP_OFFSET + 0x0CCU)
++#define DBI_PCIE_DMA_READ_DONE_IMWR_HIGH		(DBI_PCIE_DMA_CAP_OFFSET + 0x0D0U)
++#define DBI_PCIE_DMA_READ_ABORT_IMWR_LOW		(DBI_PCIE_DMA_CAP_OFFSET + 0x0D4U)
++#define DBI_PCIE_DMA_READ_ABORT_IMWR_HIGH		(DBI_PCIE_DMA_CAP_OFFSET + 0x0D8U)
++#define DBI_PCIE_DMA_RD_CH_CONTROL1		(DBI_PCIE_DMA_CAP_OFFSET + 0x300U)
++#define DBI_PCIE_DMA_RD_TRANSFER_SIZE		(DBI_PCIE_DMA_CAP_OFFSET + 0x308U)
++#define DBI_PCIE_DMA_RD_SAR_LOW		(DBI_PCIE_DMA_CAP_OFFSET + 0x30CU)
++#define DBI_PCIE_DMA_RD_SAR_HIGH		(DBI_PCIE_DMA_CAP_OFFSET + 0x310U)
++#define DBI_PCIE_DMA_RD_DAR_LOW		(DBI_PCIE_DMA_CAP_OFFSET + 0x314U)
++#define DBI_PCIE_DMA_RD_DAR_HIGH		(DBI_PCIE_DMA_CAP_OFFSET + 0x318U)
++
+ /*
+  * Mask/shift bits in DBI configuration registers
+  */
+@@ -93,7 +139,20 @@
+ #define PCIE_DBI_GEN4_RXMARGIN_MAX_TIMING_OFFSET_MASK		((u32)0x3FU << PCIE_DBI_GEN4_RXMARGIN_MAX_TIMING_OFFSET_SHIFT)
+ #define PCIE_DBI_GEN4_RXMARGIN_NUM_TIMING_STEPS_MASK		((u32)0x3FU << PCIE_DBI_GEN4_RXMARGIN_NUM_TIMING_STEPS_SHIFT)
+ 
+-#define PCIE_LINK_UP_TIMEOUT		(1000LL)
++#define PCIE_DBI_DMA_ABORT_INT_STATUS_SHIFT		(16U)
++#define PCIE_DBI_DMA_DONE_INT_STATUS_SHIFT		(0U)
++#define PCIE_DBI_DMA_ABORT_INT_STATUS_MASK		((u32)0xFU << PCIE_DBI_DMA_ABORT_INT_STATUS_SHIFT)
++#define PCIE_DBI_DMA_DONE_INT_STATUS_MASK		((u32)0xFU << PCIE_DBI_DMA_DONE_INT_STATUS_SHIFT)
++
++#define PCIE_DBI_DMA_CS_SHIFT		(0x5U)
++#define PCIE_DBI_DMA_CS_RUN_MASK		(0x1U << PCIE_DBI_DMA_CS_SHIFT)
++#define PCIE_DBI_DMA_CS_HALT_MASK		(0x2U << PCIE_DBI_DMA_CS_SHIFT)
++#define PCIE_DBI_DMA_CS_STOP_MASK		(0x3U << PCIE_DBI_DMA_CS_SHIFT)
++#define PCIE_DBI_DMA_CS_MASK		(PCIE_DBI_DMA_CS_RUN_MASK |  \
++	PCIE_DBI_DMA_CS_HALT_MASK | \
++	PCIE_DBI_DMA_CS_STOP_MASK)
++
++#define PCIE_LINK_UP_TIMEOUT		(120LL)
+ #define PCIE_LINK_UP_DELAY		(1U)
+ #define PCIE_VDM_MSG_GRANT_TIMEOUT		(1000LL)
+ #define PCIE_VDM_MSG_GRANT_DELAY		(1U)
+@@ -149,6 +208,11 @@ enum tcc_pcie_msg_route {
+ 	DP_PCIE_MSG_RESERVED2,
+ };
+ 
++struct tcc_pcie_edma {
++	atomic_t cond;
++	s32 irq;
++};
++
+ struct tcc_pcie {
+ 	struct dw_pcie		*pci;
+ 	void __iomem		*link_base;
+@@ -161,6 +225,7 @@ struct tcc_pcie {
+ 
+ 	enum tcc_pcie_variants		variant;
+ 	enum dw_pcie_device_mode		mode;
++	struct tcc_pcie_edma		*edma;
+ #ifdef CONFIG_DEBUG_FS
+ 	enum tcc_pcie_loopback_mode		loopback_mode;
+ #endif
+@@ -220,7 +285,7 @@ static inline u32 tcc_pcie_readl(void __iomem *base, u32 offset)
+ }
+ 
+ static inline void tcc_pcie_writel(void __iomem *base, u32 offset, u32 value,
+-			 u32 mask)
++		u32 mask)
+ {
+ 	if (base != NULL) {
+ 		iowrite32((ioread32(base + offset) & ~mask)|value,
+@@ -558,10 +623,10 @@ DEFINE_SIMPLE_ATTRIBUTE(tcc_pcie_link_speed_fops, tcc_pcie_get_link_speed,
+ 		tcc_pcie_set_link_speed, "%llu\n");
+ 
+ DEFINE_SIMPLE_ATTRIBUTE(tcc_pcie_loopback_fops, tcc_pcie_loopback_get_mode,
+-			tcc_pcie_loopback_set_mode, "%llu\n");
++		tcc_pcie_loopback_set_mode, "%llu\n");
+ 
+ DEFINE_SIMPLE_ATTRIBUTE(tcc_pcie_vdm_fops, tcc_pcie_recv_vdm, tcc_pcie_send_vdm,
+-			"%llu\n");
++		"%llu\n");
+ 
+ static s32 tcc_pcie_debugfs_init(struct tcc_pcie *tp)
+ {
+@@ -601,7 +666,7 @@ static s32 tcc_pcie_reset_control(const struct tcc_pcie *tp)
+ 	s32 err = 0;
+ 
+ 	if (tp != NULL) {
+-		if (IS_ENABLED(CONFIG_RESET_TCC) != 0) {
++		if (IS_ENABLED(CONFIG_RESET_TELECHIPS) != 0) {
+ 			if (tp->reset != NULL) {
+ 				err = reset_control_assert(tp->reset);
+ 				if (err == 0) {
+@@ -700,24 +765,6 @@ static s32 tcc_pcie_gen4_init(const struct tcc_pcie *tp)
+ 	return err;
+ }
+ 
+-static s32 tcc_pcie_clear_slv_addr_mask(const struct tcc_pcie *tp)
+-{
+-	s32 err = 0;
+-
+-	if (tp != NULL) {
+-		u32 val, mask;
+-
+-		val = 0x0U;
+-		mask = PCIE_LINK_CFG_SLV_ADDR_MASK;
+-		tcc_pcie_writel(tp->link_base, PCIE_SLV_INDIRECT_ADDR_MASK,
+-				val, mask);
+-	} else {
+-		err = -EINVAL;
+-	}
+-
+-	return err;
+-}
+-
+ static s32 tcc_pcie_set_dev_type(const struct tcc_pcie *tp)
+ {
+ 	s32 err = 0;
+@@ -811,7 +858,9 @@ static s32 tcc_pcie_init_phy(const struct tcc_pcie *tp)
+ 	if (tp != NULL) {
+ 		err = phy_init(tp->phy);
+ 		if (err == 0) {
+-			err = tcc_pcie_gen4_init(tp);
++			if (tp->variant == TCC807X) {
++				err = tcc_pcie_gen4_init(tp);
++			}
+ 		}
+ 	} else {
+ 		err = -EINVAL;
+@@ -828,10 +877,6 @@ static s32 tcc_pcie_set_defaults(const struct tcc_pcie *tp)
+ 		struct dw_pcie *pci = tp->pci;
+ 
+ 		err = tcc_pcie_init_phy(tp);
+-		if (err == 0) {
+-			err = tcc_pcie_clear_slv_addr_mask(tp);
+-		}
+-
+ 		if (err == 0) {
+ 			err = tcc_pcie_set_dev_type(tp);
+ 		}
+@@ -952,27 +997,34 @@ static void tcc_pcie_write_dbi(struct dw_pcie *pci, void __iomem *base,
+ {
+ 	if (pci != NULL) {
+ 		const struct tcc_pcie *tp = (const struct tcc_pcie *)to_tcc_pcie(pci);
+-		u32 write_val = val;
++		u32 mask, write_val = val;
+ 		s32 sz;
+ 
+-		if (tp->variant == TCC803X) {
+-			if ((reg == 0x90cU) ||
+-					(reg == 0x914U)) {
+-				if (((val & 0xFFF00000U) == 0x11000000U)
+-						|| ((val & 0xFFF00000U) == 0x11600000U)
+-						|| ((val & 0xFFF00000U) == 0x11700000U)
+-						|| ((val & 0xFFF00000U) == 0x11800000U)
+-				   ) {
+-					write_val &= 0x00FFFFFFU;
+-				}
++		if (tp->variant != TCC803X) {
++			mask = 0x3FFFFFFFU;
++			if ((reg == to_atu_outb_reg(0, PCIE_ATU_UNR_LOWER_BASE)) ||
++					(reg == to_atu_outb_reg(1, PCIE_ATU_UNR_LOWER_BASE)) ||
++					(reg == to_atu_outb_reg(2, PCIE_ATU_UNR_LOWER_BASE)) ||
++					(reg == to_atu_outb_reg(0, PCIE_ATU_UNR_LOWER_LIMIT)) ||
++					(reg == to_atu_outb_reg(1, PCIE_ATU_UNR_LOWER_LIMIT)) ||
++					(reg == to_atu_outb_reg(2, PCIE_ATU_UNR_LOWER_LIMIT))) {
++				write_val &= mask;
+ 			}
+-		} else {
+-			if ((reg == 0x00000CU) ||
+-					(reg == 0x00020CU) ||
+-					(reg == 0x00030CU) ||
+-					(reg == 0x00040CU)) {
++
++			if ((reg == to_atu_outb_reg(0, PCIE_ATU_UNR_UPPER_BASE)) ||
++					(reg == to_atu_outb_reg(1, PCIE_ATU_UNR_UPPER_BASE)) ||
++					(reg == to_atu_outb_reg(2, PCIE_ATU_UNR_UPPER_BASE)) ||
++					(reg == to_atu_inb_reg(0, PCIE_ATU_UNR_UPPER_BASE)) ||
++					(reg == to_atu_inb_reg(1, PCIE_ATU_UNR_UPPER_BASE)) ||
++					(reg == to_atu_inb_reg(2, PCIE_ATU_UNR_UPPER_BASE))) {
+ 				write_val = 0x0U;
+ 			}
++		} else {
++			mask = 0x00FFFFFFU;
++			if ((reg == (u32)PCIE_ATU_LOWER_BASE) ||
++					(reg == (u32)PCIE_ATU_LIMIT)) {
++				write_val &= mask;
++			}
+ 		}
+ 
+ 		if (!__builtin_add_overflow(size, 0, &sz)) {
+@@ -1141,8 +1193,16 @@ static s32 tcc_pcie_host_init(struct pcie_port *pp)
+ 	return err;
+ }
+ 
++static void tcc_pcie_set_num_vectors(struct pcie_port *pp)
++{
++	if (pp != NULL) {
++		pp->num_vectors = MAX_MSI_IRQS;
++	}
++}
++
+ static const struct dw_pcie_host_ops tcc_pcie_rc_ops = {
+ 	.host_init = tcc_pcie_host_init,
++	.set_num_vectors = tcc_pcie_set_num_vectors,
+ };
+ 
+ /* MSI int handler */
+@@ -1246,12 +1306,11 @@ static s32 tcc_pcie_deassert_pwrup_reset(const struct tcc_pcie *tp)
+ 	if (tp != NULL) {
+ 		if (tp->variant != TCC803X) {
+ 			u32 val, mask;
++
+ 			/* deassert power up reset */
+ 			mask = PCIE_LINK_CFG_POWER_UP_RST_MASK;
+ 			val = mask;
+ 			tcc_pcie_writel(tp->link_base, PCIE_PHY_RST_CTRL, val, mask);
+-
+-			udelay(500); //need to find proper delay
+ 		}
+ 	} else {
+ 		err = -EINVAL;
+@@ -1298,14 +1357,9 @@ static s32 tcc_pcie_set_clksrc(const struct tcc_pcie *tp)
+ 		if ((tp->variant == TCC803X) || (tp->variant == TCC807X)) {
+ 			u32 val, mask;
+ 
+-			if (tp->refclk_type == 0x0U) {
+-				mask = PCIE_LINK_CFG_REFCLK_EXT_EN_MASK;
+-				val = mask;
+-				tcc_pcie_writel(tp->link_base, PCIE_PHY_CTRL, val, mask);
+-			}
+-
+-			mask = PCIE_LINK_CFG_PHY_REFCLK_SEL_MASK;
+-			val |= (((tp->refclk_type == 0U) ? REFCLK_SRC_PLL : REFCLK_SRC_IO)
++			mask = PCIE_LINK_CFG_REFCLK_EXT_EN_MASK | PCIE_LINK_CFG_PHY_REFCLK_SEL_MASK;
++			val = (tp->refclk_type == 0x0U) ? PCIE_LINK_CFG_REFCLK_EXT_EN_MASK : 0x0U;
++			val |= ((u32)((tp->refclk_type == 0x0U) ? REFCLK_SRC_PLL : REFCLK_SRC_IO)
+ 					<< PCIE_LINK_CFG_PHY_REFCLK_SEL_SHIFT);
+ 			tcc_pcie_writel(tp->link_base, PCIE_PHY_CTRL, val, mask);
+ 		}
+@@ -1337,6 +1391,170 @@ static s32 tcc_pcie_set_clk(const struct tcc_pcie *tp)
+ }
+ 
+ #ifdef CONFIG_PCIE_DW_EP
++static irqreturn_t tcc_pcie_edma_irq_handler(s32 irq, void *arg)
++{
++	struct tcc_pcie *tp = (struct tcc_pcie *)arg;
++	irqreturn_t ret = (irqreturn_t)IRQ_NONE;
++
++	(void)irq;
++
++	if (tp != NULL) {
++		struct dw_pcie *pci = tp->pci;
++		u32 reg, val, status;
++
++		status = tcc_pcie_readl(tp->link_base, PCIE_EDMA_INTR_STS);
++		if((status & PCIE_LINK_CFG_EDMA_INTR_STS_MASK) != 0x0U) {
++			reg = ((status & PCIE_LINK_CFG_EDMA_WR_INTR_STS_MASK) != 0x0U) ?
++				DBI_PCIE_DMA_WRITE_INT_STATUS : DBI_PCIE_DMA_READ_INT_STATUS;
++
++			val = dw_pcie_readl_dbi(pci, reg);
++			reg = ((status & PCIE_LINK_CFG_EDMA_WR_INTR_STS_MASK) != 0x0U) ?
++				DBI_PCIE_DMA_WRITE_INT_CLEAR : DBI_PCIE_DMA_READ_INT_CLEAR;
++			if ((val & PCIE_DBI_DMA_DONE_INT_STATUS_MASK) != 0x0U) {
++				if (atomic_read(&tp->edma->cond) == 0) {
++					atomic_set(&tp->edma->cond, 1);
++				}
++			}
++			dw_pcie_writel_dbi(pci, reg, val);
++
++			ret = (irqreturn_t)IRQ_HANDLED;
++		}
++	}
++
++	return ret;
++}
++
++static s32 tcc_pcie_init_edma(struct tcc_pcie *tp, struct platform_device *pdev)
++{
++	s32 err = 0;
++
++	if ((tp != NULL) && (pdev != NULL)) {
++		if (tp->variant != TCC803X) {
++			tp->edma = devm_kzalloc(&pdev->dev,
++					sizeof(struct tcc_pcie_edma), GFP_KERNEL);
++			if (tp->edma != NULL) {
++				tp->edma->irq = platform_get_irq(pdev, 1);
++				if (tp->edma->irq > 0) {
++					err = devm_request_irq(&pdev->dev, (u32)tp->edma->irq,
++							tcc_pcie_edma_irq_handler, IRQF_SHARED,
++							"telechips-pcie-edma", tp);
++				}
++			}
++		}
++	} else {
++		err = -EINVAL;
++	}
++
++	return err;
++}
++
++static s32 dw_edma_async_transfer_program(struct dw_pcie *pci, enum edma_data_direction dir, u64 src, u64 dst, u32 size)
++{
++	s32 err = 0;
++
++	if (pci != NULL) {
++		struct tcc_pcie *tp = to_tcc_pcie(pci);
++		u32 reg, val, mask;
++
++		mask = PCIE_DBI_DMA_CS_MASK;
++		reg = (dir == EDMA_TO_PNR) ?
++			DBI_PCIE_DMA_WR_CH_CONTROL1 : DBI_PCIE_DMA_RD_CH_CONTROL1;
++		val = dw_pcie_readl_dbi(pci, reg) & mask;
++		if (val != PCIE_DBI_DMA_CS_RUN_MASK) {
++			mask = PCIE_LINK_CFG_EDMA_INTR_EN_MASK;
++			val = tcc_pcie_readl(tp->link_base, PCIE_EDMA_INTR_EN) & ~mask;
++			val |= (dir == EDMA_TO_PNR) ?
++				PCIE_LINK_CFG_EDMA_WR_INTR_EN_MASK : PCIE_LINK_CFG_EDMA_RD_INTR_EN_MASK;
++			tcc_pcie_writel(tp->link_base, PCIE_EDMA_INTR_EN, val, mask);
++
++			atomic_set(&tp->edma->cond, 0);
++			dw_pcie_writel_dbi(pci, DBI_PCIE_DMA_CTRL_DATA_ARB_PRIOR, 0x608U);
++			if (dir == EDMA_TO_PNR) {
++				/* Write Channel0 */
++				dw_pcie_writel_dbi(pci, DBI_PCIE_DMA_WRITE_ENGINE_EN, 0x1U);
++				dw_pcie_writel_dbi(pci, DBI_PCIE_DMA_WRITE_CHANNEL_ARB_WEIGHT_LOW, 0x20C41U);
++				dw_pcie_writel_dbi(pci, DBI_PCIE_DMA_WRITE_INT_MASK, 0x0U);
++				dw_pcie_writel_dbi(pci, DBI_PCIE_DMA_WR_CH_CONTROL1, 0x04000018U);
++				dw_pcie_writel_dbi(pci, DBI_PCIE_DMA_WR_TRANSFER_SIZE, size);
++				dw_pcie_writel_dbi(pci, DBI_PCIE_DMA_WR_SAR_LOW, lower_32_bits(src));
++				dw_pcie_writel_dbi(pci, DBI_PCIE_DMA_WR_SAR_HIGH, upper_32_bits(src));
++				dw_pcie_writel_dbi(pci, DBI_PCIE_DMA_WR_DAR_LOW, lower_32_bits(dst));
++				dw_pcie_writel_dbi(pci, DBI_PCIE_DMA_WR_DAR_HIGH, upper_32_bits(dst));
++				dw_pcie_writel_dbi(pci, DBI_PCIE_DMA_WRITE_DOORBELL, 0x0U);
++			} else {
++				/* Read Channel0 */
++				dw_pcie_writel_dbi(pci, DBI_PCIE_DMA_READ_ENGINE_EN, 0x1U);
++				dw_pcie_writel_dbi(pci, DBI_PCIE_DMA_READ_CHANNEL_ARB_WEIGHT_LOW, 0x20C41U);
++				dw_pcie_writel_dbi(pci, DBI_PCIE_DMA_READ_INT_MASK, 0x0U);
++				dw_pcie_writel_dbi(pci, DBI_PCIE_DMA_RD_CH_CONTROL1, 0x04000018U);
++				dw_pcie_writel_dbi(pci, DBI_PCIE_DMA_RD_TRANSFER_SIZE, size);
++				dw_pcie_writel_dbi(pci, DBI_PCIE_DMA_RD_SAR_LOW, lower_32_bits(src));
++				dw_pcie_writel_dbi(pci, DBI_PCIE_DMA_RD_SAR_HIGH, upper_32_bits(src));
++				dw_pcie_writel_dbi(pci, DBI_PCIE_DMA_RD_DAR_LOW, lower_32_bits(dst));
++				dw_pcie_writel_dbi(pci, DBI_PCIE_DMA_RD_DAR_HIGH, upper_32_bits(dst));
++				dw_pcie_writel_dbi(pci, DBI_PCIE_DMA_READ_DOORBELL, 0x0U);
++			}
++		} else {
++			err = -EAGAIN;
++		}
++	} else {
++		err = -EINVAL;
++	}
++
++	return err;
++}
++
++static s32 dw_edma_async_transfer_complete(struct tcc_pcie *tp)
++{
++	s32 err = 0;
++
++	if (tp != NULL) {
++		struct timespec64 start, end, gap;
++
++		ktime_get_ts64(&start);
++		while(atomic_read(&tp->edma->cond) == 0) {
++			ktime_get_ts64(&end);
++			gap = timespec64_sub(end, start);
++			if ((timespec64_to_ns(&gap)/NSEC_PER_MSEC) > 1000LL) {
++				err = -EAGAIN;
++				break;
++			} else {
++				udelay(1);
++			}
++		}
++	} else {
++		err = -EINVAL;
++	}
++
++	return err;
++}
++
++s32 dw_edma_async_transfer(void *arg, enum edma_data_direction dir,
++		u64 src, u64 dst, u32 sz, bool pending)
++{
++	s32 err = 0;
++
++	if (arg != NULL) {
++		struct dw_pcie_ep *ep = epc_get_drvdata((struct pci_epc *)arg);
++		struct dw_pcie *pci = to_dw_pcie_from_ep(ep);
++		struct tcc_pcie *tp = to_tcc_pcie(pci);
++
++		if (valid_edma_direction(dir) != 0) {
++			err = dw_edma_async_transfer_program(pci, dir, src, dst, sz);
++			if ((err == 0) && pending) {
++				err = dw_edma_async_transfer_complete(tp);
++			}
++		} else {
++			err = -EINVAL;
++		}
++	} else {
++		err = -EINVAL;
++	}
++
++	return err;
++}
++EXPORT_SYMBOL_GPL(dw_edma_async_transfer);
++
+ static s32 tcc_pcie_ep_reset_bar(struct dw_pcie *pci, s32 bar)
+ {
+ 	s32 err = 0;
+@@ -1367,9 +1585,9 @@ static s32 tcc_pcie_ep_get_iatu_unroll_support(struct dw_pcie *pci)
+ 
+ 		val = dw_pcie_readl_dbi(pci, PCIE_ATU_VIEWPORT);
+ 		if (val == 0xFFFFFFFFU) {
+-			pci->iatu_unroll_enabled = 1;
++			pci->iatu_unroll_enabled = 1U;
+ 		} else {
+-			pci->iatu_unroll_enabled = 0;
++			pci->iatu_unroll_enabled = 0U;
+ 		}
+ 	} else {
+ 		err = -EINVAL;
+@@ -1384,8 +1602,8 @@ static const struct pci_epc_features tcc_pcie_epc_features = {
+ 	.msix_capable = 0x1U,
+ 	.align = SZ_64K,
+ };
+-static const struct pci_epc_features*
+-				 tcc_pcie_get_features(struct dw_pcie_ep *ep)
++
++static const struct pci_epc_features* tcc_pcie_get_features(struct dw_pcie_ep *ep)
+ {
+ 	(void)ep;
+ 
+@@ -1509,8 +1727,8 @@ static void tcc_pcie_prog_outbound_atu_unroll(struct dw_pcie *pci, u8 func_no,
+ }
+ 
+ static void tcc_pcie_prog_outbound_atu_no_unroll(struct dw_pcie *pci, u8 func_no, u32 index,
+-				  u32 type, u64 cpu_addr, u64 pci_addr,
+-				  size_t size)
++		u32 type, u64 cpu_addr, u64 pci_addr,
++		size_t size)
+ {
+ 	if (pci != NULL) {
+ 		const struct dw_pcie_ep *ep = (const struct dw_pcie_ep *)&pci->ep;
+@@ -1554,11 +1772,11 @@ static void tcc_pcie_prog_outbound_atu_no_unroll(struct dw_pcie *pci, u8 func_no
+ }
+ 
+ static void tcc_pcie_prog_outbound_atu(struct dw_pcie *pci, u8 func_no, u32 index,
+-				  u32 type, u64 cpu_addr, u64 pci_addr,
+-				  size_t size)
++		u32 type, u64 cpu_addr, u64 pci_addr,
++		size_t size)
+ {
+ 	if (pci != NULL) {
+-		if (pci->iatu_unroll_enabled != (u8)0) {
++		if (pci->iatu_unroll_enabled != 0U) {
+ 			tcc_pcie_prog_outbound_atu_unroll(pci, func_no, index, type,
+ 					cpu_addr, pci_addr, size);
+ 		} else {
+@@ -1569,8 +1787,8 @@ static void tcc_pcie_prog_outbound_atu(struct dw_pcie *pci, u8 func_no, u32 inde
+ }
+ 
+ static int tcc_pcie_ep_outbound_atu(struct dw_pcie_ep *ep, u8 func_no,
+-				   phys_addr_t phys_addr,
+-				   u64 pci_addr, size_t size)
++		phys_addr_t phys_addr,
++		u64 pci_addr, size_t size)
+ {
+ 	s32 err = 0;
+ 
+@@ -1597,8 +1815,8 @@ static int tcc_pcie_ep_outbound_atu(struct dw_pcie_ep *ep, u8 func_no,
+ }
+ 
+ static s32 tcc_pcie_ep_map_addr(struct pci_epc *epc, u8 func_no,
+-			       phys_addr_t addr,
+-			       u64 pci_addr, size_t size)
++		phys_addr_t addr,
++		u64 pci_addr, size_t size)
+ {
+ 	s32 err = 0;
+ 
+@@ -1618,7 +1836,7 @@ static s32 tcc_pcie_ep_map_addr(struct pci_epc *epc, u8 func_no,
+ }
+ 
+ static void tcc_pcie_disable_atu(struct dw_pcie *pci, u32 index,
+-			 enum dw_pcie_region_type type)
++		enum dw_pcie_region_type type)
+ {
+ 	if (pci != NULL) {
+ 		if ((type == DW_PCIE_REGION_INBOUND) ||
+@@ -1633,7 +1851,7 @@ static void tcc_pcie_disable_atu(struct dw_pcie *pci, u32 index,
+ }
+ 
+ static int tcc_pcie_find_index(const struct dw_pcie_ep *ep, phys_addr_t addr,
+-			      u32 *atu_index)
++		u32 *atu_index)
+ {
+ 	s32 err = 0;
+ 
+@@ -1660,7 +1878,7 @@ static int tcc_pcie_find_index(const struct dw_pcie_ep *ep, phys_addr_t addr,
+ }
+ 
+ static void tcc_pcie_ep_unmap_addr(struct pci_epc *epc, u8 func_no,
+-				  phys_addr_t addr)
++		phys_addr_t addr)
+ {
+ 	(void)func_no;
+ 
+@@ -1688,8 +1906,7 @@ static unsigned int tcc_pcie_ep_func_select(struct dw_pcie_ep *ep, u8 func_no)
+ 	return func_offset;
+ }
+ 
+-static struct dw_pcie_ep_func *
+-tcc_pcie_ep_get_func_from_ep(const struct dw_pcie_ep *ep, u8 func_no)
++static struct dw_pcie_ep_func *tcc_pcie_ep_get_func_from_ep(const struct dw_pcie_ep *ep, u8 func_no)
+ {
+ 	struct dw_pcie_ep_func *ep_func = NULL;
+ 
+@@ -1716,7 +1933,7 @@ static s32 tcc_pcie_ep_get_msi_addr(struct dw_pcie_ep *ep, u8 func_no,
+ 		struct dw_pcie *pci = to_dw_pcie_from_ep(ep);
+ 		const struct dw_pcie_ep_func *ep_func =
+ 			(const struct dw_pcie_ep_func *)tcc_pcie_ep_get_func_from_ep(
+-				(const struct dw_pcie_ep *)ep, func_no);
++					(const struct dw_pcie_ep *)ep, func_no);
+ 		const struct pci_epc *epc = (const struct pci_epc *)ep->epc;
+ 
+ 		if ((ep_func == NULL) || (ep_func->msi_cap == (u8)0)) {
+@@ -1790,7 +2007,7 @@ static s32 tcc_pcie_ep_raise_legacy_irq(struct dw_pcie_ep *ep, u8 func_no)
+ }
+ 
+ static s32 tcc_pcie_ep_raise_msi_irq(struct dw_pcie_ep *ep, u8 func_no,
+-			     u8 interrupt_num)
++		u8 interrupt_num)
+ {
+ 	s32 err = 0;
+ 
+@@ -1850,7 +2067,7 @@ static struct pci_epf_msix_tbl *tcc_pcie_ep_get_msix_table(struct dw_pcie_ep *ep
+ }
+ 
+ static s32 tcc_pcie_ep_raise_msix_irq(struct dw_pcie_ep *ep, u8 func_no,
+-			      u16 interrupt_num)
++		u16 interrupt_num)
+ {
+ 	s32 err = 0;
+ 
+@@ -1903,7 +2120,7 @@ static s32 tcc_pcie_ep_raise_msix_irq(struct dw_pcie_ep *ep, u8 func_no,
+ }
+ 
+ static s32 tcc_pcie_ep_raise_irq(struct dw_pcie_ep *ep, u8 func_no,
+-			     enum pci_epc_irq_type type, u16 interrupt_num)
++		enum pci_epc_irq_type type, u16 interrupt_num)
+ {
+ 	s32 err = 0;
+ 
+@@ -2008,6 +2225,10 @@ static s32 tcc_pcie_add_pcie_ep(struct tcc_pcie *tp, struct platform_device *pde
+ 			pci->dbi_base2 = pci->dbi_base + PCIE_DBI2_OFFSET;
+ 			err = dw_pcie_ep_init(ep);
+ 		}
++
++		if (err == 0) {
++			err = tcc_pcie_init_edma(tp, pdev);
++		}
+ 	} else {
+ 		err = -EINVAL;
+ 	}
+@@ -2033,6 +2254,14 @@ static s32 tcc_pcie_add_pcie_port(struct tcc_pcie *tp, struct platform_device *p
+ 			err = tcc_pcie_set_defaults((const struct tcc_pcie *)tp);
+ 		}
+ 
++		if (err == 0) {
++			if (tp->variant != TCC803X) {
++				err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
++			} else {
++				err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
++			}
++		}
++
+ 		if (err == 0) {
+ 			err = dw_pcie_host_init(pp);
+ 		}
+@@ -2069,8 +2298,7 @@ static int tcc_pcie_add_port(struct tcc_pcie *tp,
+ 		}
+ 
+ 		if (err != 0) {
+-			dev_err(&pdev->dev,
+-					"failed to init controller as %s mode\n",
++			dev_err(&pdev->dev, "failed to init controller as %s mode\n",
+ 					(tp->mode == DW_PCIE_EP_TYPE) ? "EP" : "RC");
+ 		}
+ 	} else {
+@@ -2242,8 +2470,13 @@ static s32 tcc_pcie_parse_phy(struct platform_device *pdev,
+ 	if ((tp != NULL) && (pdev != NULL)) {
+ 		tp->phy = devm_phy_get(&pdev->dev, "pcie-phy");
+ 		if (IS_ERR(tp->phy)) {
+-			dev_err(&pdev->dev, "Failed to get pcie phy. please check your configuration.\n");
+-			err = PTR_ERR(tp->phy);
++			if (tp->variant != TCN100X) {
++				dev_err(&pdev->dev, "Failed to get pcie phy. Check kernel configuration.\n");
++				err = (s32)PTR_ERR(tp->phy);
++			} else {
++				dev_warn(&pdev->dev, "Failed to get pcie phy. Check if intended\n");
++				tp->phy = NULL;
++			}
+ 		}
+ 	} else {
+ 		err = -EINVAL;
+@@ -2258,10 +2491,10 @@ static s32 tcc_pcie_parse_reset(struct platform_device *pdev,
+ 	s32 err = 0;
+ 
+ 	if ((tp != NULL) && (pdev != NULL)) {
+-		if (IS_ENABLED(CONFIG_RESET_TCC) != 0) {
++		if (IS_ENABLED(CONFIG_RESET_TELECHIPS) != 0) {
+ 			tp->reset = devm_reset_control_get(&pdev->dev, NULL);
+ 			if (IS_ERR(tp->reset)) {
+-				err = (s32)PTR_ERR(tp->reset);
++				tp->reset = NULL;
+ 			}
+ 		}
+ 	} else {
+@@ -2544,7 +2777,7 @@ static s32 tcc_pcie_suspend_late(struct device *dev)
+ static const struct dev_pm_ops tcc_pcie_pm_ops = {
+ 	SET_SYSTEM_SLEEP_PM_OPS(tcc_pcie_suspend, tcc_pcie_resume)
+ 	SET_LATE_SYSTEM_SLEEP_PM_OPS(tcc_pcie_suspend_late,
+-				      tcc_pcie_resume_early)
++			tcc_pcie_resume_early)
+ };
+ 
+ static struct platform_driver tcc_pcie_driver = {
+diff --git a/drivers/phy/telechips/phy-sec08lpp-pcie.c b/drivers/phy/telechips/phy-sec08lpp-pcie.c
+index 9dd93a9b5379..f81aa3282360 100644
+--- a/drivers/phy/telechips/phy-sec08lpp-pcie.c
++++ b/drivers/phy/telechips/phy-sec08lpp-pcie.c
+@@ -386,8 +386,6 @@ static s32 sec08lpp_pcie_phy_reset(struct phy *phy)
+ 		mask = PCIE_PHY_REG_PMA_CMN_RSTN_MASK | PCIE_PHY_REG_PMA_PORT0_RSTN_MASK;
+ 		val = mask;
+ 		sec08lpp_pcie_phy_writel(priv->phy_base, PCIE_PHY_REG00, val, mask);
+-
+-		udelay(500); //need to find proper delay
+ 	} else {
+ 		err = -ENODEV;
+ 	}
+@@ -436,9 +434,9 @@ static s32 sec08lpp_pcie_phy_pma_pll_lock(const struct sec08lpp_pcie_phy *priv)
+ 		val = sec08lpp_pcie_phy_readl(priv->clk_base, PCIE_CLK_CFG08) & mask;
+ 		if (val == mask) {
+ 			mask = PCIE_PMA_PLL_LOCK_MASK;
+-			while ((sec08lpp_pcie_phy_readl(priv->pma_base, PCIE_PMA_CMN_REG13C) & mask) != mask) {
+-				mdelay(10);
+-			}
++			do {
++				val = sec08lpp_pcie_phy_readl(priv->pma_base, PCIE_PMA_CMN_REG13C);
++			} while ((val & mask) != mask);
+ 		}
+ 	} else {
+ 		err = -EINVAL;
+@@ -499,8 +497,8 @@ static s32 sec08lpp_pcie_phy_set_clk(const struct sec08lpp_pcie_phy *priv, u32 m
+ 
+ 				mask = PCIE_CLK_CFG_PLL_LOCK_MASK;
+ 				do {
+-					val = sec08lpp_pcie_phy_readl(priv->clk_base, PCIE_CLK_CFG08) & mask;
+-				} while (val == 0x0U);
++					val = sec08lpp_pcie_phy_readl(priv->clk_base, PCIE_CLK_CFG08);
++				} while ((val & mask) != mask);
+ 
+ 				mask = PCIE_CLK_CFG_ERIO_ISO_ENB_MASK |
+ 					PCIE_CLK_CFG_ERIO_PLL_LOCK_DONE_MASK |
+@@ -508,8 +506,6 @@ static s32 sec08lpp_pcie_phy_set_clk(const struct sec08lpp_pcie_phy *priv, u32 m
+ 					PCIE_CLK_CFG_ERIO_EN_MASK;
+ 				val = mask;
+ 				sec08lpp_pcie_phy_writel(priv->clk_base, PCIE_CLK_CFG04, val, mask);
+-
+-				mdelay(15);
+ 			} else {
+ 				mask = PCIE_PHY_REG_LPLL_REF_CLK_SEL_MASK |
+ 					PCIE_PHY_REG_PORT0_REF_CLK_EN_MASK;
+@@ -844,9 +840,9 @@ static s32 sec08lpp_pcie_phy_suspend_late(struct device *dev)
+ 		const struct sec08lpp_pcie_phy *priv =
+ 			(const struct sec08lpp_pcie_phy *)dev_get_drvdata(dev);
+ 
+-		err = sec08lpp_pcie_phy_disable_clk(priv);
++		err = sec08lpp_pcie_phy_disable_clkout(priv);
+ 		if (err == 0) {
+-			err = sec08lpp_pcie_phy_disable_clkout(priv);
++			err = sec08lpp_pcie_phy_disable_clk(priv);
+ 		}
+ 	} else {
+ 		err = -ENODEV;
+@@ -855,9 +851,25 @@ static s32 sec08lpp_pcie_phy_suspend_late(struct device *dev)
+ 	return err;
+ }
+ 
++static s32 sec08lpp_pcie_phy_resume_early(struct device *dev)
++{
++	s32 err = 0;
++
++	if (dev != NULL) {
++		const struct sec08lpp_pcie_phy *priv =
++			(const struct sec08lpp_pcie_phy *)dev_get_drvdata(dev);
++
++		err = sec08lpp_pcie_phy_enable_clk(priv);
++	} else {
++		err = -ENODEV;
++	}
++
++	return err;
++}
++
+ static const struct dev_pm_ops sec08lpp_pcie_phy_pm_ops = {
+ 	SET_LATE_SYSTEM_SLEEP_PM_OPS(sec08lpp_pcie_phy_suspend_late,
+-			NULL)
++			sec08lpp_pcie_phy_resume_early)
+ };
+ 
+ static const struct of_device_id sec08lpp_pcie_phy_id_table[] = {
+@@ -971,13 +983,13 @@ static s32 sec08lpp_pcie_phy_register(struct sec08lpp_pcie_phy *priv)
+ 
+ 		phy = devm_phy_create(priv->dev, NULL, &sec08lpp_pcie_phy_ops);
+ 		if (IS_ERR(phy)) {
+-			err = PTR_ERR(phy);
++			err = (s32)PTR_ERR(phy);
+ 		} else {
+ 			phy_set_drvdata(phy, priv);
+ 			provider = devm_of_phy_provider_register(priv->dev,
+ 					of_phy_simple_xlate);
+ 			if (IS_ERR(provider)) {
+-				err = PTR_ERR(provider);
++				err = (s32)PTR_ERR(provider);
+ 			}
+ 		}
+ 	} else {
+diff --git a/drivers/phy/telechips/phy-sec14lpp-pcie.c b/drivers/phy/telechips/phy-sec14lpp-pcie.c
+index 18cee0278457..ed29fee1ee2d 100644
+--- a/drivers/phy/telechips/phy-sec14lpp-pcie.c
++++ b/drivers/phy/telechips/phy-sec14lpp-pcie.c
+@@ -10,7 +10,6 @@
+ #include <linux/clk.h>
+ #include <linux/err.h>
+ #include <linux/pm_runtime.h>
+-#include <linux/delay.h>
+ #include <linux/phy/phy.h>
+ #include <linux/platform_device.h>
+ 
+@@ -76,16 +75,16 @@
+ #define PCIE_REF_CLK_RATE		(100000000UL)
+ 
+ struct sec14lpp_pcie_phy {
+-	struct device	*dev;
++	struct device *dev;
+ 	void __iomem *phy_base;
+ 	void __iomem *link_base;
+-	struct clk		*fbus_clk;
+-	struct clk		*aux_clk;
+-	struct clk		*apb_clk;
+-	struct clk		*pcs_clk;
+-	struct clk		*ref_clk;
++	struct clk *fbus_clk;
++	struct clk *aux_clk;
++	struct clk *apb_clk;
++	struct clk *pcs_clk;
++	struct clk *ref_clk;
+ 	u32 pms;
+-	u32	mode;
++	u32 mode;
+ };
+ 
+ static inline u32 sec14lpp_pcie_phy_readl(const void __iomem *base, u32 offset)
+@@ -295,7 +294,6 @@ static s32 sec14lpp_pcie_phy_init(struct phy *phy)
+ 		mask = PCIE_LINK_CFG_AUX_SEL_MASK;
+ 		val = mask;
+ 		sec14lpp_pcie_phy_writel(priv->link_base, PCIE_LINK_CFG43, val, mask);
+-		udelay(100);
+ 
+ 		mask = PCIE_LINK_CFG_RCVRY_IDLE_STATE_MASK;
+ 		do {
+@@ -351,9 +349,25 @@ static s32 sec14lpp_pcie_phy_suspend_late(struct device *dev)
+ 	return err;
+ }
+ 
++static s32 sec14lpp_pcie_phy_resume_early(struct device *dev)
++{
++	s32 err = 0;
++
++	if (dev != NULL) {
++		const struct sec14lpp_pcie_phy *priv =
++			(const struct sec14lpp_pcie_phy *)dev_get_drvdata(dev);
++
++		err = sec14lpp_pcie_phy_enable_clk(priv);
++	} else {
++		err = -ENODEV;
++	}
++
++	return err;
++}
++
+ static const struct dev_pm_ops sec14lpp_pcie_phy_pm_ops = {
+ 	SET_LATE_SYSTEM_SLEEP_PM_OPS(sec14lpp_pcie_phy_suspend_late,
+-		NULL)
++			sec14lpp_pcie_phy_resume_early)
+ };
+ 
+ 
+@@ -481,7 +495,7 @@ static s32 sec14lpp_pcie_phy_register(struct sec14lpp_pcie_phy *priv)
+ 
+ 		phy = devm_phy_create(priv->dev, NULL, &sec14lpp_pcie_phy_ops);
+ 		if (IS_ERR(phy)) {
+-			err = PTR_ERR(phy);
++			err = (s32)PTR_ERR(phy);
+ 		}
+ 
+ 		if (err == 0) {
+@@ -489,7 +503,7 @@ static s32 sec14lpp_pcie_phy_register(struct sec14lpp_pcie_phy *priv)
+ 			provider = devm_of_phy_provider_register(priv->dev,
+ 					of_phy_simple_xlate);
+ 			if (IS_ERR(provider)) {
+-				err = PTR_ERR(provider);
++				err = (s32)PTR_ERR(provider);
+ 			}
+ 		}
+ 	} else {
+diff --git a/drivers/phy/telechips/phy-ss14lpp-x1ns-pcie.c b/drivers/phy/telechips/phy-ss14lpp-x1ns-pcie.c
+index f53014a67e33..527bd44af33f 100644
+--- a/drivers/phy/telechips/phy-ss14lpp-x1ns-pcie.c
++++ b/drivers/phy/telechips/phy-ss14lpp-x1ns-pcie.c
+@@ -10,7 +10,6 @@
+ #include <linux/clk.h>
+ #include <linux/err.h>
+ #include <linux/pm_runtime.h>
+-#include <linux/delay.h>
+ #include <linux/phy/phy.h>
+ #include <linux/platform_device.h>
+ 
+@@ -23,12 +22,18 @@
+ /*
+  * PCIe controller wrapper phy configuration registers
+  */
++#define PCIE_PHY_REG05		(0x014U)
+ #define PCIE_PHY_REG08		(0x020U)
+ #define PCIE_PHY_REG43		(0x0ACU)
+ 
+ /*
+  * Mask/shift bits in PCIe related registers
+  */
++#define PCIE_PHY_REG_MPLLB_STATE_SHIFT		(9U)
++#define PCIE_PHY_REG_MPLLA_STATE_SHIFT		(4U)
++#define PCIE_PHY_REG_MPLLB_STATE_MASK		((u32)0x1U << PCIE_PHY_REG_MPLLB_STATE_SHIFT)
++#define PCIE_PHY_REG_MPLLA_STATE_MASK		((u32)0x1U << PCIE_PHY_REG_MPLLA_STATE_SHIFT)
++
+ #define PCIE_PHY_REG_REF_USE_PAD_SHIFT		(3U)
+ #define PCIE_PHY_REG_REF_USE_PAD_MASK		((u32)0x1U << PCIE_PHY_REG_REF_USE_PAD_SHIFT)
+ 
+@@ -51,13 +56,13 @@
+ #define PCIE_PHY_CLK_RATE		(100000000UL)
+ 
+ struct ss14lpp_x1ns_pcie_phy {
+-	struct device	*dev;
++	struct device *dev;
+ 	void __iomem *phy_base;
+ 	void __iomem *clk_base;
+-	struct clk	*phy_clk;
+-	struct clk	*fbus_clk;
++	struct clk *phy_clk;
++	struct clk *fbus_clk;
+ 	u32 pms;
+-	u32	mode;
++	u32 mode;
+ };
+ 
+ static inline u32 ss14lpp_x1ns_pcie_phy_readl(const void __iomem *base, u32 offset)
+@@ -159,6 +164,12 @@ static s32 ss14lpp_x1ns_pcie_phy_set_clk(const struct ss14lpp_x1ns_pcie_phy *pri
+ 					PCIE_CLK_CFG_ERIO_ISO_ENB_MASK;
+ 				val = mask;
+ 				ss14lpp_x1ns_pcie_phy_writel(priv->clk_base, PCIE_CLK_CFG04, val, mask);
++
++				mask = PCIE_PHY_REG_MPLLB_STATE_MASK |
++					PCIE_PHY_REG_MPLLA_STATE_MASK;
++				do {
++					val = ss14lpp_x1ns_pcie_phy_readl(priv->phy_base, PCIE_PHY_REG05);
++				} while ((val & mask) != mask);
+ 			}
+ 		}
+ 	} else {
+@@ -314,9 +325,9 @@ static s32 ss14lpp_x1ns_pcie_phy_suspend_late(struct device *dev)
+ 		const struct ss14lpp_x1ns_pcie_phy *priv =
+ 			(const struct ss14lpp_x1ns_pcie_phy *)dev_get_drvdata(dev);
+ 
+-		err = ss14lpp_x1ns_pcie_phy_disable_clk(priv);
++		err = ss14lpp_x1ns_pcie_phy_disable_clkout(priv);
+ 		if (err == 0) {
+-			err = ss14lpp_x1ns_pcie_phy_disable_clkout(priv);
++			err = ss14lpp_x1ns_pcie_phy_disable_clk(priv);
+ 		}
+ 	} else {
+ 		err = -ENODEV;
+@@ -325,9 +336,25 @@ static s32 ss14lpp_x1ns_pcie_phy_suspend_late(struct device *dev)
+ 	return err;
+ }
+ 
++static s32 ss14lpp_x1ns_pcie_phy_resume_early(struct device *dev)
++{
++	s32 err = 0;
++
++	if (dev != NULL) {
++		const struct ss14lpp_x1ns_pcie_phy *priv =
++			(const struct ss14lpp_x1ns_pcie_phy *)dev_get_drvdata(dev);
++
++		err = ss14lpp_x1ns_pcie_phy_enable_clk(priv);
++	} else {
++		err = -ENODEV;
++	}
++
++	return err;
++}
++
+ static const struct dev_pm_ops ss14lpp_x1ns_pcie_phy_pm_ops = {
+ 	SET_LATE_SYSTEM_SLEEP_PM_OPS(ss14lpp_x1ns_pcie_phy_suspend_late,
+-		NULL)
++			ss14lpp_x1ns_pcie_phy_resume_early)
+ };
+ 
+ #ifdef CONFIG_OF
+@@ -430,7 +457,7 @@ static s32 ss14lpp_x1ns_pcie_phy_register(struct ss14lpp_x1ns_pcie_phy *priv)
+ 
+ 		phy = devm_phy_create(priv->dev, NULL, &ss14lpp_x1ns_pcie_phy_ops);
+ 		if (IS_ERR(phy)) {
+-			err = PTR_ERR(phy);
++			err = (s32)PTR_ERR(phy);
+ 		}
+ 
+ 		if (err == 0) {
+@@ -438,7 +465,7 @@ static s32 ss14lpp_x1ns_pcie_phy_register(struct ss14lpp_x1ns_pcie_phy *priv)
+ 			provider = devm_of_phy_provider_register(priv->dev,
+ 					of_phy_simple_xlate);
+ 			if (IS_ERR(provider)) {
+-				err = PTR_ERR(provider);
++				err = (s32)PTR_ERR(provider);
+ 			}
+ 		}
+ 	} else {
+@@ -478,7 +505,8 @@ static s32 ss14lpp_x1ns_pcie_phy_remove(struct platform_device *pdev)
+ 	s32 err = 0;
+ 
+ 	if (pdev != NULL) {
+-		const struct ss14lpp_x1ns_pcie_phy *priv = (const struct ss14lpp_x1ns_pcie_phy *)platform_get_drvdata(pdev);
++		const struct ss14lpp_x1ns_pcie_phy *priv =
++			(const struct ss14lpp_x1ns_pcie_phy *)platform_get_drvdata(pdev);
+ 
+ 		pm_runtime_disable(priv->dev);
+ 		err = ss14lpp_x1ns_pcie_phy_disable_clk(priv);
+diff --git a/drivers/phy/telechips/phy-ss14lpp-x2ns-pcie.c b/drivers/phy/telechips/phy-ss14lpp-x2ns-pcie.c
+index 0ea7899b61bf..825ade2890f7 100644
+--- a/drivers/phy/telechips/phy-ss14lpp-x2ns-pcie.c
++++ b/drivers/phy/telechips/phy-ss14lpp-x2ns-pcie.c
+@@ -10,7 +10,6 @@
+ #include <linux/clk.h>
+ #include <linux/err.h>
+ #include <linux/pm_runtime.h>
+-#include <linux/delay.h>
+ #include <linux/phy/phy.h>
+ #include <linux/platform_device.h>
+ 
+@@ -28,7 +27,6 @@
+  * PCIe controller wrapper phy configuration registers
+  */
+ #define PCIE_PHY_REG08		(0x020U)
+-#define PCIE_PHY_REG43		(0x0ACU)
+ #define PCIE_PHY_REG57		(0x0E4U)
+ #define PCIE_PHY_REG58		(0x0E8U)
+ 
+@@ -84,13 +82,13 @@
+ #define PCIE_PHY_CLK_RATE		(100000000UL)
+ 
+ struct ss14lpp_x2ns_pcie_phy {
+-	struct device	*dev;
++	struct device *dev;
+ 	void __iomem *phy_base;
+ 	void __iomem *clk_base;
+-	struct clk	*phy_clk;
+-	struct clk	*fbus_clk;
++	struct clk *phy_clk;
++	struct clk *fbus_clk;
+ 	u32 bifurcation;
+-	s32	mode;
++	u32 mode;
+ };
+ 
+ static inline u32 ss14lpp_x2ns_pcie_phy_readl(const void __iomem *base, u32 offset)
+@@ -161,28 +159,28 @@ static s32 ss14lpp_x2ns_pcie_phy_set_clk(const struct ss14lpp_x2ns_pcie_phy *pri
+ 
+ 			if ((mode & 0xF0U) == 0x0U) {
+ 				mask = PCIE_CLK_CFG_PLL_LOCK_CNT_MASK;
+-				val = 7U << PCIE_CLK_CFG_PLL_LOCK_CNT_SHIFT;
++				val = (u32)7U << PCIE_CLK_CFG_PLL_LOCK_CNT_SHIFT;
+ 				ss14lpp_x2ns_pcie_phy_writel(priv->clk_base, PCIE_CLK_CFG06, val, mask);
+ 
+ 				mask = PCIE_CLK_CFG_OFFSETCALCNT_MASK;
+-				val = 0x2U << PCIE_CLK_CFG_OFFSETCALCNT_SHIFT;
++				val = (u32)0x2U << PCIE_CLK_CFG_OFFSETCALCNT_SHIFT;
+ 				ss14lpp_x2ns_pcie_phy_writel(priv->clk_base, PCIE_CLK_CFG07, val, mask);
+ 
+ 				mask = PCIE_CLK_CFG_DESKEW_MASK | PCIE_CLK_CFG_FBDIV_MASK;
+-				val = 200U << PCIE_CLK_CFG_FBDIV_SHIFT;
++				val = (u32)200U << PCIE_CLK_CFG_FBDIV_SHIFT;
+ 				ss14lpp_x2ns_pcie_phy_writel(priv->clk_base, PCIE_CLK_CFG00, val, mask);
+ 
+ 				mask = PCIE_CLK_CFG_REFDIV_MASK | PCIE_CLK_CFG_REFDIVEN_MASK;
+-				val = 0x3U << PCIE_CLK_CFG_REFDIV_SHIFT;
+-				val |= 0x1U << PCIE_CLK_CFG_REFDIVEN_SHIFT;
++				val = (u32)0x3U << PCIE_CLK_CFG_REFDIV_SHIFT;
++				val |= (u32)0x1U << PCIE_CLK_CFG_REFDIVEN_SHIFT;
+ 				ss14lpp_x2ns_pcie_phy_writel(priv->clk_base, PCIE_CLK_CFG02, val, mask);
+ 
+ 				mask = PCIE_CLK_CFG_PLLEN_MASK | PCIE_CLK_CFG_POSTDIV0_MASK | PCIE_CLK_CFG_POSTDIVEN_MASK;
+-				val = 0x4U << PCIE_CLK_CFG_POSTDIV0_SHIFT;
+-				val |= 0x1U << PCIE_CLK_CFG_POSTDIVEN_SHIFT;
++				val = (u32)0x4U << PCIE_CLK_CFG_POSTDIV0_SHIFT;
++				val |= (u32)0x1U << PCIE_CLK_CFG_POSTDIVEN_SHIFT;
+ 				ss14lpp_x2ns_pcie_phy_writel(priv->clk_base, PCIE_CLK_CFG01, val, mask);
+ 
+-				val |= 0x1U << PCIE_CLK_CFG_PLLEN_SHIFT;
++				val |= (u32)0x1U << PCIE_CLK_CFG_PLLEN_SHIFT;
+ 				ss14lpp_x2ns_pcie_phy_writel(priv->clk_base, PCIE_CLK_CFG01, val, mask);
+ 
+ 				mask = PCIE_CLK_CFG_PLL_STS_LOCK_MASK;
+@@ -363,9 +361,25 @@ static s32 ss14lpp_x2ns_pcie_phy_suspend_late(struct device *dev)
+ 	return err;
+ }
+ 
++static s32 ss14lpp_x2ns_pcie_phy_resume_early(struct device *dev)
++{
++	s32 err = 0;
++
++	if (dev != NULL) {
++		const struct ss14lpp_x2ns_pcie_phy *priv =
++			(const struct ss14lpp_x2ns_pcie_phy *)dev_get_drvdata(dev);
++
++		err = ss14lpp_x2ns_pcie_phy_enable_clk(priv);
++	} else {
++		err = -ENODEV;
++	}
++
++	return err;
++}
++
+ static const struct dev_pm_ops ss14lpp_x2ns_pcie_phy_pm_ops = {
+ 	SET_LATE_SYSTEM_SLEEP_PM_OPS(ss14lpp_x2ns_pcie_phy_suspend_late,
+-		NULL)
++			ss14lpp_x2ns_pcie_phy_resume_early)
+ };
+ 
+ #ifdef CONFIG_OF
+@@ -467,13 +481,13 @@ static s32 ss14lpp_x2ns_pcie_phy_register(struct ss14lpp_x2ns_pcie_phy *priv)
+ 
+ 		phy = devm_phy_create(priv->dev, NULL, &ss14lpp_x2ns_pcie_phy_ops);
+ 		if (IS_ERR(phy)) {
+-			err = PTR_ERR(phy);
++			err = (s32)PTR_ERR(phy);
+ 		} else {
+ 			phy_set_drvdata(phy, priv);
+ 			provider = devm_of_phy_provider_register(priv->dev,
+ 					of_phy_simple_xlate);
+ 			if (IS_ERR(provider)) {
+-				err = PTR_ERR(provider);
++				err = (s32)PTR_ERR(provider);
+ 			}
+ 		}
+ 	} else {
+@@ -513,7 +527,8 @@ static s32 ss14lpp_x2ns_pcie_phy_remove(struct platform_device *pdev)
+ 	s32 err = 0;
+ 
+ 	if (pdev != NULL) {
+-		const struct ss14lpp_x2ns_pcie_phy *priv = (const struct ss14lpp_x2ns_pcie_phy *)platform_get_drvdata(pdev);
++		const struct ss14lpp_x2ns_pcie_phy *priv =
++			(const struct ss14lpp_x2ns_pcie_phy *)platform_get_drvdata(pdev);
+ 
+ 		pm_runtime_disable(priv->dev);
+ 		err = ss14lpp_x2ns_pcie_phy_disable_clk(priv);
+diff --git a/include/soc/telechips/dw_edma.h b/include/soc/telechips/dw_edma.h
+new file mode 100644
+index 000000000000..c58a9f227cc8
+--- /dev/null
++++ b/include/soc/telechips/dw_edma.h
+@@ -0,0 +1,30 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * Copyright (C) Telechips Inc.
++ */
++
++#ifndef DW_EDMA_H
++#define DW_EDMA_H
++
++enum edma_data_direction {
++	EDMA_NONE = 0,
++	EDMA_TO_PNR = 1,
++	EDMA_FROM_PNR = 2,
++};
++
++static inline s32 valid_edma_direction(enum edma_data_direction dir)
++{
++	return (dir == EDMA_TO_PNR) || (dir == EDMA_FROM_PNR);
++}
++
++#ifdef CONFIG_PCIE_DW_EP
++s32 dw_edma_async_transfer(void *arg, enum edma_data_direction dir, u64 src, u64 dst, u32 sz, bool pending);
++#else
++static inline s32 dw_edma_async_transfer(void *arg, enum edma_data_direction dir, u64 src, u64 dst, u32 sz, bool pending)
++{
++	return -ENXIO;
++}
++#endif
++
++#endif	/* DW_EDMA_H */
++
+-- 
+2.25.1
+
