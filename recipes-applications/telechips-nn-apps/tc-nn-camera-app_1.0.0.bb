@@ -3,8 +3,9 @@ SECTION = "applications"
 LICENSE = "Telechips"
 LIC_FILES_CHKSUM = "file://${THISDIR}/../../licenses/Telechips;md5=bf748a8e7a397a71f48f21715741f8a1"
 
-SRC_URI = "${TELECHIPS_TOPST_GIT}/tc-nn-camera-app.git;protocol=${TOPST_GIT_PROTOCOL};branch=${TOPST_BRANCH}"
-SRCREV = "fa3001859a07f9789cf14db1fd0ceeaa76988d1f"
+# Release tag: 1.3.1-r01
+SRC_URI = "${TELECHIPS_TOPST_GIT}/tc-nn-camera-app.git;protocol=${TOPST_GIT_PROTOCOL};nobranch=1"
+SRCREV = "ff941ee167bf553cc4771eca06a551939f8751e7"
 
 inherit pkgconfig cmake
 
